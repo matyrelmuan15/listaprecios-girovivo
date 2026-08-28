@@ -21,6 +21,8 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 6. Excluir siempre la hoja `Marcas Actualización Dinámica`.
 7. Recorrer todas las hojas del libro **dinámicamente** en cada corrida — pueden agregarse categorías nuevas con el tiempo.
 8. Todo cambio se registra en `RegistroCambios`, con **una fila por cada celda modificada** (si se tocan 2 columnas en la misma fila, son 2 registros). El total de filas de `RegistroCambios` debe coincidir exactamente con la cantidad de celdas modificadas.
+   - El formato es **único y compartido** por los tres scripts, y vive en `scripts/registro.py`: `Fecha | TipoOperacion | Hoja | Fila | NombreProducto | Marca | Columna | ValorAnterior | ValorNuevo | Detalle`. Ningún script define encabezados propios.
+   - Antes de escribir, cada script valida que los encabezados de la hoja coincidan con esos 10. Si no coinciden, aborta sin guardar en vez de apilar filas desalineadas.
 9. Flujo obligatorio en **3 fases**:
    1. Inspección (sin escribir nada).
    2. Dry-run / simulación con resumen (sin escribir nada).
@@ -30,9 +32,17 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 No agrupar proveedores por fórmula compartida, aunque hoy coincida el porcentaje entre dos o más. Cada proveedor tiene su propia carpeta y `NOTAS.md` independiente, porque las fórmulas pueden cambiar de forma desacoplada con el tiempo.
 
 ## Estructura de carpetas
+
+Raíz real y única del proyecto:
+`C:\Users\Maty y Katy\Desktop\ListaPreciosGiroVivo`
+
 ```
 ListaPreciosGiroVivo/
 ├── CLAUDE.md
+├── ESTRUCTURA_EXCEL.md
+├── requirements.txt
+├── abrir_lista_de_precios.bat
+├── crear_acceso_directo.ps1
 ├── archivo/
 │   └── Lista de Precios Giro Vivo 2026.xlsx
 ├── backup/
@@ -40,8 +50,13 @@ ListaPreciosGiroVivo/
 │   └── <proveedor>/
 │       └── NOTAS.md
 └── scripts/
-    ├── actualizar_precios.py
-    └── asignar_dolar.py   (pendiente — se agrega en la etapa de dólar)
+    ├── actualizar_precios.py   (Tipo 1 — precios por match de códigos)
+    ├── asignar_dolar.py        (Tipo 2 — recálculo por valor de dólar)
+    ├── actualizar_fecha.py     (Tipo 3 — solo FechaActualizacion)
+    ├── registro.py             (formato único de RegistroCambios, compartido)
+    ├── migrar_registro.py      (migración de un solo uso de RegistroCambios)
+    ├── ia_revision.py          (revisión automática de anomalías)
+    └── interfaz.py             (interfaz gráfica de escritorio)
 ```
 
 ## Estilo de comunicación

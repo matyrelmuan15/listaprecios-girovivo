@@ -8,41 +8,56 @@ Script genérico Tipo 2 del proyecto "Lista de Precios Giro Vivo".
 Recalcula "PrecioConIVA" a partir de un nuevo valor de dólar y actualiza
 "DolarReferencia" y "FechaActualizacion", según tres modos posibles:
 
-  - marca        : filtra por columna "Marca" (una o varias, separadas por coma)
+  - marca        : filtra por columna "Marca" (una o varias)
   - fecha         : filtra por rango de "FechaActualizacion" (dd/mm/aaaa)
   - marca_fecha   : combina ambos filtros (deben cumplirse los dos)
 
 Fórmula aplicada fila por fila:
   nuevo PrecioConIVA = (PrecioConIVA actual / DolarReferencia actual) * PRECIO_ACTUALIZADO
 
+MODO GUIADO (recomendado)
+--------------------------
+Si lo corrés sin ningún argumento:
+
+    python asignar_dolar.py
+
+el script:
+  1) Te pregunta el tipo de actualización con un menú de flechas.
+  2) Si corresponde, te muestra las marcas que existen realmente en el
+     archivo (leídas del Excel) para que tildes una o varias con la barra
+     espaciadora, en vez de tipear el nombre exacto.
+  3) Te pide fecha(s) y el nuevo valor de dólar por teclado (con validación).
+  4) Corre el dry-run, te muestra el resumen, y al final te pregunta con
+     un menú de flechas si confirmás aplicar los cambios reales.
+
 Reglas seguidas (según CLAUDE.md del proyecto):
   - Nunca se modifica el archivo real sin backup previo con timestamp.
   - Columnas localizadas siempre por nombre de encabezado exacto (fila 1 de cada hoja).
-  - Se abre el libro SIN data_only=True, para no destruir fórmulas preexistentes.
+  - Se abre el libro SIN data_only=True para escribir, para no destruir fórmulas
+    preexistentes.
   - Valores escritos siempre fijos (no fórmulas): precio como número (2 decimales
     máx.), DolarReferencia como número, fecha como texto dd/mm/aaaa.
   - Se excluye siempre la hoja "Marcas Actualización Dinámica".
   - Se recorren todas las hojas del libro dinámicamente.
   - Flujo obligatorio en 2 pasos: primero DRY-RUN (sin --confirmar), que muestra
     el detalle por hoja y un ejemplo de cálculo sin escribir nada; recién con
-    --confirmar se aplica el backup y los cambios reales.
+    --confirmar (o confirmando en el menú guiado) se aplica el backup y los
+    cambios reales.
 
-USO
----
+USO POR LÍNEA DE COMANDOS (para automatizar o repetir una corrida exacta)
+----------------------------------------------------------------------------
   1) Vista previa (no escribe nada):
-     python asignar_dolar.py --archivo "archivo/Lista de Precios Giro Vivo 2026.xlsx" \
-         --modo marca --marca "Bontey" --precio-actualizado 1350
+     python asignar_dolar.py --modo marca --marca "Bontey" --precio-actualizado 1350
 
   2) Ejecución real (recién después de revisar la vista previa):
-     python asignar_dolar.py --archivo "archivo/Lista de Precios Giro Vivo 2026.xlsx" \
-         --modo marca --marca "Bontey" --precio-actualizado 1350 --confirmar
+     python asignar_dolar.py --modo marca --marca "Bontey" --precio-actualizado 1350 --confirmar
 
   Modo fecha:
-     python asignar_dolar.py --archivo "..." --modo fecha \
+     python asignar_dolar.py --modo fecha \
          --fecha-desde 01/06/2026 --fecha-hasta 30/06/2026 --precio-actualizado 1350
 
   Modo marca_fecha:
-     python asignar_dolar.py --archivo "..." --modo marca_fecha \
+     python asignar_dolar.py --modo marca_fecha \
          --marca "Bontey,OtraMarca" --fecha-desde 01/06/2026 --fecha-hasta 30/06/2026 \
          --precio-actualizado 1350
 """
@@ -55,8 +70,20 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+import registro
+from ia_revision import (
+    formatear_items_marcados,
+    imprimir_items_marcados_json,
+    revisar_cambios_con_ia,
+)
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+ARCHIVO_PATH = PROJECT_ROOT / "archivo" / "Lista de Precios Giro Vivo 2026.xlsx"
+
 SHEET_EXCLUDE = "Marcas Actualización Dinámica"
-SHEET_REGISTRO = "RegistroCambios"
+# El formato de RegistroCambios es único y compartido: vive en registro.py.
+SHEET_REGISTRO = registro.HOJA_REGISTRO
 
 # Encabezados que buscamos en la fila 1 de cada hoja (por nombre exacto, sin
 # distinguir mayúsculas/minúsculas ni espacios al principio/final).
@@ -65,6 +92,121 @@ COL_DOLAR = "DolarReferencia"
 COL_MARCA = "Marca"
 COL_FECHA = "FechaActualizacion"
 COL_NOMBRE_CANDIDATOS = ["NombreProducto", "Producto", "Nombre"]
+
+
+# --------------------------------------------------------------------------
+# Menús interactivos por consola (flechas + Enter / Espacio) — solo Windows
+# --------------------------------------------------------------------------
+def menu_seleccionar(opciones, titulo="Seleccioná una opción"):
+    """Menú de selección única navegable con flechas ↑ / ↓ y Enter.
+    Devuelve el índice elegido, o None si se cancela con Esc."""
+    try:
+        import msvcrt
+    except ImportError:
+        return _menu_seleccionar_numerico(opciones, titulo)
+
+    seleccion = 0
+
+    def dibujar():
+        print("\n" + titulo)
+        print("=" * len(titulo))
+        for i, op in enumerate(opciones):
+            marca = "  > " if i == seleccion else "    "
+            print(f"{marca}{op}")
+        print("\n(Flechas arriba/abajo para moverte, Enter para confirmar, Esc para cancelar)")
+
+    dibujar()
+    while True:
+        tecla = msvcrt.getch()
+        if tecla in (b"\xe0", b"\x00"):
+            tecla2 = msvcrt.getch()
+            if tecla2 == b"H":
+                seleccion = (seleccion - 1) % len(opciones)
+                dibujar()
+            elif tecla2 == b"P":
+                seleccion = (seleccion + 1) % len(opciones)
+                dibujar()
+        elif tecla == b"\r":
+            return seleccion
+        elif tecla == b"\x1b":
+            return None
+
+
+def menu_multi_seleccionar(opciones, titulo="Marcá una o más opciones"):
+    """Menú de selección múltiple (checkboxes) navegable con flechas,
+    Espacio para tildar/destildar y Enter para confirmar.
+    Devuelve una lista de índices elegidos (ordenada), o None si se cancela."""
+    try:
+        import msvcrt
+    except ImportError:
+        return _menu_multi_numerico(opciones, titulo)
+
+    seleccion = 0
+    marcadas = set()
+
+    def dibujar(mensaje_extra=""):
+        print("\n" + titulo)
+        print("=" * len(titulo))
+        for i, op in enumerate(opciones):
+            check = "[x]" if i in marcadas else "[ ]"
+            cursor = ">" if i == seleccion else " "
+            print(f" {cursor} {check} {op}")
+        print(
+            "\n(Flechas arriba/abajo, Espacio para tildar/destildar, "
+            "Enter para confirmar, Esc para cancelar)"
+        )
+        if mensaje_extra:
+            print(mensaje_extra)
+
+    dibujar()
+    while True:
+        tecla = msvcrt.getch()
+        if tecla in (b"\xe0", b"\x00"):
+            tecla2 = msvcrt.getch()
+            if tecla2 == b"H":
+                seleccion = (seleccion - 1) % len(opciones)
+                dibujar()
+            elif tecla2 == b"P":
+                seleccion = (seleccion + 1) % len(opciones)
+                dibujar()
+        elif tecla == b" ":
+            if seleccion in marcadas:
+                marcadas.discard(seleccion)
+            else:
+                marcadas.add(seleccion)
+            dibujar()
+        elif tecla == b"\r":
+            if not marcadas:
+                dibujar("  Tenés que tildar al menos una marca con la barra espaciadora.")
+                continue
+            return sorted(marcadas)
+        elif tecla == b"\x1b":
+            return None
+
+
+def _menu_seleccionar_numerico(opciones, titulo):
+    print("\n" + titulo)
+    print("=" * len(titulo))
+    for i, op in enumerate(opciones, start=1):
+        print(f"  {i}) {op}")
+    while True:
+        valor = input("Elegí un número: ").strip()
+        if valor.isdigit() and 1 <= int(valor) <= len(opciones):
+            return int(valor) - 1
+        print("  Opción inválida, intentá de nuevo.")
+
+
+def _menu_multi_numerico(opciones, titulo):
+    print("\n" + titulo)
+    print("=" * len(titulo))
+    for i, op in enumerate(opciones, start=1):
+        print(f"  {i}) {op}")
+    while True:
+        valor = input("Elegí uno o más números separados por coma: ").strip()
+        partes = [p.strip() for p in valor.split(",") if p.strip()]
+        if partes and all(p.isdigit() and 1 <= int(p) <= len(opciones) for p in partes):
+            return sorted({int(p) - 1 for p in partes})
+        print("  Entrada inválida, intentá de nuevo.")
 
 
 # --------------------------------------------------------------------------
@@ -135,6 +277,37 @@ def normalizar_marca(valor):
     return str(valor).strip() if valor is not None else ""
 
 
+def listar_marcas(archivo_path):
+    """Lee el Excel en modo solo lectura y devuelve la lista ordenada de
+    marcas distintas presentes en la columna 'Marca' de cualquier hoja
+    (excepto la excluida y RegistroCambios). No modifica ni guarda nada."""
+    wb = load_workbook(archivo_path, data_only=True, read_only=True)
+    marcas = set()
+    try:
+        for ws in wb.worksheets:
+            if ws.title in (SHEET_EXCLUDE, SHEET_REGISTRO):
+                continue
+            col_marca = None
+            primera_fila = next(ws.iter_rows(min_row=1, max_row=1), None)
+            if primera_fila is None:
+                continue
+            for cell in primera_fila:
+                if cell.value is not None and str(cell.value).strip().lower() == COL_MARCA.lower():
+                    col_marca = cell.column
+                    break
+            if col_marca is None:
+                continue
+            for row in ws.iter_rows(min_row=2):
+                if col_marca - 1 >= len(row):
+                    continue
+                valor = row[col_marca - 1].value
+                if valor is not None and str(valor).strip():
+                    marcas.add(str(valor).strip())
+    finally:
+        wb.close()
+    return sorted(marcas)
+
+
 def hacer_backup(archivo_path):
     archivo_path = Path(archivo_path)
     backup_dir = archivo_path.parent.parent / "backup"
@@ -176,6 +349,14 @@ def procesar(args, interactivo=False):
 
     wb = load_workbook(args.archivo, data_only=False)
 
+    # Validación fail-fast del formato de RegistroCambios: se corre apenas
+    # cargado el libro y ANTES del backup, para no dejar un backup inútil ni
+    # apilar filas desalineadas bajo encabezados que no corresponden.
+    try:
+        registro.validar_encabezados(wb)
+    except registro.RegistroError as e:
+        sys.exit(f"\nERROR: {e}")
+
     reporte = []          # detalle por hoja para el dry-run
     cambios_a_aplicar = []  # lista de dicts con todo lo necesario para escribir + registrar
     ejemplo_global = None
@@ -184,7 +365,10 @@ def procesar(args, interactivo=False):
         if ws.title == SHEET_EXCLUDE or ws.title == SHEET_REGISTRO:
             continue
 
-        col_map, nombre_col = encontrar_columnas(ws, requeridas)
+        # "Marca" se localiza siempre, aunque el modo no filtre por ella:
+        # el registro necesita la marca de la fila en los tres modos.
+        a_buscar = list(dict.fromkeys(requeridas + [COL_MARCA]))
+        col_map, nombre_col = encontrar_columnas(ws, a_buscar)
         if not all(req in col_map for req in requeridas):
             faltantes = [r for r in requeridas if r not in col_map]
             reporte.append({
@@ -280,18 +464,79 @@ def procesar(args, interactivo=False):
 
     imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_desde, fecha_hasta)
 
+    # --- Filas de registro: una por cada CELDA modificada (regla 8) ---
+    # En Tipo 2 son 3 por producto: PrecioConIVA, DolarReferencia y
+    # FechaActualizacion. Se arman también en dry-run, para poder mostrarlas.
+    corrida = registro.RegistroCorrida(
+        registro.TIPO_DOLAR,
+        construir_detalle(modo, marcas_filtro, fecha_desde, fecha_hasta, precio_actualizado),
+    )
+    for cambio in cambios_a_aplicar:
+        comunes = {
+            "hoja": cambio["hoja"],
+            "fila": cambio["fila"],
+            "nombre_producto": cambio["nombre_producto"],
+            "marca": cambio["marca"],
+        }
+        corrida.agregar(columna=COL_PRECIO,
+                        valor_anterior=cambio["precio_anterior"],
+                        valor_nuevo=cambio["precio_nuevo"], **comunes)
+        corrida.agregar(columna=COL_DOLAR,
+                        valor_anterior=cambio["dolar_anterior"],
+                        valor_nuevo=cambio["dolar_nuevo"], **comunes)
+        corrida.agregar(columna=COL_FECHA,
+                        valor_anterior=cambio["fecha_anterior"],
+                        valor_nuevo=cambio["fecha_nueva"], **comunes)
+
     if not cambios_a_aplicar:
         print("\nNo hay ninguna fila para modificar. No se hizo backup ni se escribió nada.")
+        imprimir_items_marcados_json([])
         return
+
+    # ---- Revisión automática de posibles anomalías (estadística + IA) ----
+    cambios_para_ia = [
+        {
+            "hoja": c["hoja"],
+            "codigo": c["fila"],
+            "producto": c["nombre_producto"],
+            "valor_anterior": c["precio_anterior"],
+            "valor_nuevo": c["precio_nuevo"],
+        }
+        for c in cambios_a_aplicar
+    ]
+    print("\n--- Revisión automática de posibles anomalías ---")
+    analisis_ia, aviso_ia = revisar_cambios_con_ia(
+        cambios_para_ia,
+        contexto_extra=(
+            f"Asignación de nuevo valor de dólar (Tipo 2). Modo: {modo}. "
+            f"Nuevo valor de dólar (DolarReferencia): {precio_actualizado}."
+        ),
+    )
+    if aviso_ia:
+        print(aviso_ia)
+    if analisis_ia:
+        print(analisis_ia)
+    detalle_marcados = formatear_items_marcados(cambios_para_ia)
+    if detalle_marcados:
+        print(detalle_marcados)
+    imprimir_items_marcados_json(cambios_para_ia)
+
+    # Se muestra antes de pedir la confirmación, para que en el modo guiado
+    # se pueda revisar cómo quedaría el registro antes de decidir.
+    registro.imprimir_previsualizacion(corrida)
 
     confirmado = args.confirmar
     if not confirmado and interactivo:
-        respuesta = input("\n¿Confirmás para aplicar estos cambios? (s/n): ").strip().lower()
-        confirmado = respuesta in ("s", "si", "sí", "y", "yes")
+        idx_confirm = menu_seleccionar(
+            ["Sí, aplicar estos cambios reales", "No, salir sin modificar nada"],
+            "¿Confirmás aplicar estos cambios al archivo real?",
+        )
+        confirmado = (idx_confirm == 0)
 
     if not confirmado:
         print("\n[DRY-RUN] No se escribió nada. Revisá el detalle de arriba.")
-        print("Si está todo correcto, volvé a correr el mismo comando agregando --confirmar.")
+        if not interactivo:
+            print("Si está todo correcto, volvé a correr el mismo comando agregando --confirmar.")
         return
 
     # --- Backup antes de tocar el archivo real ---
@@ -306,51 +551,37 @@ def procesar(args, interactivo=False):
         ws.cell(row=cambio["fila"], column=cambio["col_fecha"]).value = cambio["fecha_nueva"]
 
     # --- Registrar en RegistroCambios ---
-    ws_reg = wb[SHEET_REGISTRO] if SHEET_REGISTRO in wb.sheetnames else wb.create_sheet(SHEET_REGISTRO)
-    if ws_reg.max_row == 1 and ws_reg.cell(row=1, column=1).value is None:
-        encabezados = construir_encabezados_registro(modo)
-        for i, h in enumerate(encabezados, start=1):
-            ws_reg.cell(row=1, column=i).value = h
-
-    fila_libre = ws_reg.max_row + 1
-    for cambio in cambios_a_aplicar:
-        valores = construir_fila_registro(modo, cambio, precio_actualizado)
-        for i, v in enumerate(valores, start=1):
-            ws_reg.cell(row=fila_libre, column=i).value = v
-        fila_libre += 1
+    # Verificación de conteo obligatoria (regla 8): 3 celdas por producto
+    # (PrecioConIVA + DolarReferencia + FechaActualizacion). Si no coincide
+    # se aborta sin guardar, así que el archivo real queda intacto.
+    try:
+        corrida.verificar_conteo(len(cambios_a_aplicar) * 3)
+        corrida.escribir(wb)
+    except registro.RegistroError as e:
+        sys.exit(f"\n{e}")
 
     wb.save(args.archivo)
 
     print(f"\nCambios aplicados: {len(cambios_a_aplicar)} filas modificadas.")
-    print(f"Se registraron {len(cambios_a_aplicar)} filas nuevas en '{SHEET_REGISTRO}'.")
+    print(f"Se registraron {len(corrida)} filas nuevas en '{SHEET_REGISTRO}'.")
     print("Archivo guardado correctamente.")
 
 
-def construir_encabezados_registro(modo):
-    base_inicio = ["Hoja", "NombreProducto"]
-    if modo == "marca":
-        medio = ["Marca"]
-    elif modo == "fecha":
-        medio = ["FechaActualizacion anterior"]
-    else:  # marca_fecha
-        medio = ["Marca", "FechaActualizacion anterior"]
-    fin = ["PrecioConIVA anterior", "DolarReferencia anterior",
-           "Multiplicador (PRECIO ACTUALIZADO)", "PrecioConIVA nuevo",
-           "DolarReferencia nuevo", "FechaActualizacion aplicada"]
-    return base_inicio + medio + fin
-
-
-def construir_fila_registro(modo, cambio, precio_actualizado):
-    base_inicio = [cambio["hoja"], cambio["nombre_producto"]]
-    if modo == "marca":
-        medio = [cambio["marca"]]
-    elif modo == "fecha":
-        medio = [cambio["fecha_anterior"]]
+def construir_detalle(modo, marcas_filtro, fecha_desde, fecha_hasta, precio_actualizado):
+    """Contexto de la corrida para la columna Detalle del registro."""
+    partes = [f"Modo: {modo}"]
+    partes.append(
+        "Marcas: " + (", ".join(marcas_filtro) if marcas_filtro else "(no aplica)")
+    )
+    if fecha_desde and fecha_hasta:
+        partes.append(
+            f"Rango: {fecha_desde.strftime('%d/%m/%Y')} a "
+            f"{fecha_hasta.strftime('%d/%m/%Y')}"
+        )
     else:
-        medio = [cambio["marca"], cambio["fecha_anterior"]]
-    fin = [cambio["precio_anterior"], cambio["dolar_anterior"], precio_actualizado,
-           cambio["precio_nuevo"], cambio["dolar_nuevo"], cambio["fecha_nueva"]]
-    return base_inicio + medio + fin
+        partes.append("Rango: (no aplica)")
+    partes.append(f"Nuevo DolarReferencia: {precio_actualizado}")
+    return " | ".join(partes)
 
 
 def imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_desde, fecha_hasta):
@@ -409,14 +640,6 @@ def imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_des
     print("-" * 70)
 
 
-def pedir_no_vacio(mensaje):
-    while True:
-        valor = input(mensaje).strip()
-        if valor:
-            return valor
-        print("  (no puede quedar vacío)")
-
-
 def pedir_fecha(mensaje):
     while True:
         valor = input(mensaje).strip()
@@ -434,54 +657,74 @@ def pedir_precio(mensaje):
             print("  Ingresá un número válido (ej: 1350 o 1350.50).")
 
 
-def completar_interactivamente(args):
-    """Completa los campos faltantes de 'args' preguntando por teclado.
-    Devuelve True si el modo es interactivo (para pedir confirmación al final
-    en la misma corrida, sin necesidad de --confirmar)."""
-    interactivo = args.modo is None
+class _ArgsGuiados:
+    """Objeto simple para reutilizar procesar() desde el modo guiado."""
+    pass
 
-    if not interactivo:
-        return False
+
+def modo_guiado():
+    """Flujo guiado 100% por menú (modo por flechas, marcas por casilleros,
+    fecha/precio por teclado con validación) reutilizando procesar()."""
+    if not ARCHIVO_PATH.exists():
+        sys.exit(f"ERROR: no se encontró el archivo en '{ARCHIVO_PATH}'.")
 
     print("=" * 70)
     print("ASIGNAR VALOR DÓLAR - Tipo 2")
     print("=" * 70)
 
-    if not args.archivo:
-        args.archivo = pedir_no_vacio("Ruta del archivo Excel: ")
+    opciones_modo = ["Por marca", "Por fecha", "Por marca y fecha al mismo tiempo"]
+    idx_modo = menu_seleccionar(opciones_modo, "¿Qué tipo de actualización querés hacer?")
+    if idx_modo is None:
+        print("\nOperación cancelada. No se modificó nada.")
+        return
+    modo = ["marca", "fecha", "marca_fecha"][idx_modo]
 
-    print("\n¿Qué tipo de actualización querés hacer?")
-    print("  1) Por marca")
-    print("  2) Por fecha")
-    print("  3) Por marca y fecha al mismo tiempo")
-    opcion = ""
-    while opcion not in ("1", "2", "3"):
-        opcion = input("Elegí una opción (1/2/3): ").strip()
-    args.modo = {"1": "marca", "2": "fecha", "3": "marca_fecha"}[opcion]
+    marca_texto = None
+    if modo in ("marca", "marca_fecha"):
+        marcas_disponibles = listar_marcas(ARCHIVO_PATH)
+        if not marcas_disponibles:
+            sys.exit("ERROR: no se encontraron marcas en el archivo (columna 'Marca' vacía o ausente).")
+        idxs = menu_multi_seleccionar(
+            marcas_disponibles, "Elegí una o más marcas (Espacio para tildar, Enter para confirmar)"
+        )
+        if idxs is None:
+            print("\nOperación cancelada. No se modificó nada.")
+            return
+        marca_texto = ",".join(marcas_disponibles[i] for i in idxs)
 
-    if args.modo in ("marca", "marca_fecha") and not args.marca:
-        args.marca = pedir_no_vacio(
-            "Marca(s) (si son varias, separalas con coma): ")
-
-    if args.modo in ("fecha", "marca_fecha"):
-        if not args.fecha_desde:
-            args.fecha_desde = pedir_fecha("Fecha desde (dd/mm/aaaa): ")
-        if not args.fecha_hasta:
-            args.fecha_hasta = pedir_fecha("Fecha hasta (dd/mm/aaaa): ")
-
-    if args.precio_actualizado is None:
-        args.precio_actualizado = pedir_precio(
-            "Precio actualizado (nuevo valor de dólar): ")
+    fecha_desde = fecha_hasta = None
+    if modo in ("fecha", "marca_fecha"):
+        print()
+        fecha_desde = pedir_fecha("Fecha desde (dd/mm/aaaa): ")
+        fecha_hasta = pedir_fecha("Fecha hasta (dd/mm/aaaa): ")
 
     print()
-    return True
+    precio_actualizado = pedir_precio("Precio actualizado (nuevo valor de dólar): ")
+
+    args = _ArgsGuiados()
+    args.archivo = str(ARCHIVO_PATH)
+    args.modo = modo
+    args.marca = marca_texto
+    args.fecha_desde = fecha_desde
+    args.fecha_hasta = fecha_hasta
+    args.precio_actualizado = precio_actualizado
+    args.confirmar = False
+
+    procesar(args, interactivo=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Tipo 2 - Asignar valor dólar")
-    parser.add_argument("--archivo", help="Ruta al libro Excel")
+    parser.add_argument(
+        "--archivo",
+        default=None,
+        help=(
+            "Ruta al libro Excel. Si se omite, se usa el archivo único del "
+            f"proyecto: {ARCHIVO_PATH}"
+        ),
+    )
     parser.add_argument("--modo", choices=["marca", "fecha", "marca_fecha"],
-                         help="Si se omite, el script pregunta interactivamente.")
+                         help="Si se omite junto con el resto de los flags, se abre el menú guiado.")
     parser.add_argument("--marca", help="Marca o marcas separadas por coma (requerido en modo marca/marca_fecha)")
     parser.add_argument("--fecha-desde", help="dd/mm/aaaa (requerido en modo fecha/marca_fecha)")
     parser.add_argument("--fecha-hasta", help="dd/mm/aaaa (requerido en modo fecha/marca_fecha)")
@@ -489,23 +732,23 @@ def main():
                          help="Nuevo valor de dólar (multiplicador)")
     parser.add_argument("--confirmar", action="store_true",
                          help="Aplica los cambios de verdad. Sin este flag, solo muestra el dry-run "
-                              "(salvo en modo interactivo, que pregunta al final).")
+                              "(salvo en el menú guiado, que pregunta al final).")
     args = parser.parse_args()
 
-    interactivo = completar_interactivamente(args)
+    if args.modo is None:
+        # Sin --modo (y en general sin ningún flag): menú guiado completo.
+        modo_guiado()
+        return
 
-    # Validaciones básicas también para uso por flags (mensajes claros en vez
-    # de que argparse tire error genérico de "required").
     if not args.archivo:
-        sys.exit("ERROR: falta --archivo")
-    if not args.modo:
-        sys.exit("ERROR: falta --modo (marca | fecha | marca_fecha)")
+        args.archivo = str(ARCHIVO_PATH)
+
     if args.precio_actualizado is None:
         sys.exit("ERROR: falta --precio-actualizado")
     if not Path(args.archivo).exists():
         sys.exit(f"ERROR: no se encontró el archivo '{args.archivo}'")
 
-    procesar(args, interactivo=interactivo)
+    procesar(args, interactivo=False)
 
 
 if __name__ == "__main__":

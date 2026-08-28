@@ -1,0 +1,8 @@
+openpyxl
+Pillow
+
+# Opcional: solo necesario para el enlace "Abrir Excel (Hoja1)" de scripts/interfaz.py,
+# que usa automatización COM para activar esa pestaña puntual al abrir el libro.
+# Sin esta dependencia, ese enlace ofrece un mensaje claro con alternativas.
+pywin32
+xlwt==1.3.0

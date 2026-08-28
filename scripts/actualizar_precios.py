@@ -3,7 +3,20 @@ actualizar_precios.py
 ======================
 Script genérico Tipo 1: actualización de precios por match de códigos.
 
-Uso:
+MODO GUIADO (recomendado)
+--------------------------
+Si lo corrés sin argumentos:
+
+    python actualizar_precios.py
+
+el script te muestra un menú para elegir el proveedor con las flechas
+↑ / ↓ y Enter, corre automáticamente la vista previa (dry-run) y al final
+te pregunta, también con un menú de flechas, si confirmás aplicar los
+cambios reales al archivo. No hace falta recordar nombres de proveedor
+ni flags.
+
+MODO POR LÍNEA DE COMANDOS (para automatizar o repetir una corrida exacta)
+----------------------------------------------------------------------------
     python actualizar_precios.py <proveedor> [--execute]
 
 Por defecto corre en modo DRY-RUN (no escribe nada, solo muestra el resumen
@@ -25,6 +38,13 @@ from pathlib import Path
 
 import openpyxl
 
+import registro
+from ia_revision import (
+    formatear_items_marcados,
+    imprimir_items_marcados_json,
+    revisar_cambios_con_ia,
+)
+
 # ---------------------------------------------------------------------------
 # Configuración de rutas (relativas a la raíz del proyecto)
 # ---------------------------------------------------------------------------
@@ -36,15 +56,79 @@ PROVEEDORES_DIR = PROJECT_ROOT / "proveedores"
 
 HOJA_EXCLUIDA = "Marcas Actualización Dinámica"
 HOJA_ENTRADA = "Hoja1"
-HOJA_REGISTRO = "RegistroCambios"
+HOJA_REGISTRO = registro.HOJA_REGISTRO
 
 # Formato argentino válido: dígitos, agrupados opcionalmente de a 3 con punto
 # de miles, y coma decimal opcional (ej: "2.607,75", "607,75", "2.607").
 ARG_PRICE_PATTERN = re.compile(r"^\d{1,3}(\.\d{3})*(,\d+)?$")
 
-REGISTRO_HEADERS = [
-    "Hoja", "Fila", "Codigo", "Marca", "Columna", "ValorAnterior", "ValorNuevo"
-]
+# El formato de RegistroCambios es único y compartido: vive en registro.py.
+# Este script no define encabezados propios.
+
+
+# ---------------------------------------------------------------------------
+# Menú interactivo por consola (flechas + Enter) — solo Windows
+# ---------------------------------------------------------------------------
+def listar_proveedores():
+    """Lee dinámicamente las subcarpetas de proveedores/ que tengan NOTAS.md."""
+    if not PROVEEDORES_DIR.exists():
+        return []
+    proveedores = []
+    for carpeta in sorted(PROVEEDORES_DIR.iterdir(), key=lambda p: p.name.lower()):
+        if carpeta.is_dir() and (carpeta / "NOTAS.md").exists():
+            proveedores.append(carpeta.name)
+    return proveedores
+
+
+def menu_seleccionar(opciones, titulo="Seleccioná una opción"):
+    """Menú de consola navegable con flechas ↑ / ↓ y Enter (requiere Windows).
+
+    Devuelve el índice elegido, o None si se cancela con Esc.
+    """
+    try:
+        import msvcrt
+    except ImportError:
+        # Si no estamos en Windows, se cae a un menú por número (respaldo).
+        return _menu_seleccionar_numerico(opciones, titulo)
+
+    seleccion = 0
+
+    def dibujar():
+        print("\n" + titulo)
+        print("=" * len(titulo))
+        for i, op in enumerate(opciones):
+            marca = "  > " if i == seleccion else "    "
+            print(f"{marca}{op}")
+        print("\n(Flechas arriba/abajo para moverte, Enter para confirmar, Esc para cancelar)")
+
+    dibujar()
+    while True:
+        tecla = msvcrt.getch()
+        if tecla in (b"\xe0", b"\x00"):  # prefijo de tecla especial en Windows
+            tecla2 = msvcrt.getch()
+            if tecla2 == b"H":  # flecha arriba
+                seleccion = (seleccion - 1) % len(opciones)
+                dibujar()
+            elif tecla2 == b"P":  # flecha abajo
+                seleccion = (seleccion + 1) % len(opciones)
+                dibujar()
+        elif tecla == b"\r":  # Enter
+            return seleccion
+        elif tecla == b"\x1b":  # Esc
+            return None
+
+
+def _menu_seleccionar_numerico(opciones, titulo):
+    """Respaldo simple (por si el script se corre fuera de Windows/consola real)."""
+    print("\n" + titulo)
+    print("=" * len(titulo))
+    for i, op in enumerate(opciones, start=1):
+        print(f"  {i}) {op}")
+    while True:
+        valor = input("Elegí un número: ").strip()
+        if valor.isdigit() and 1 <= int(valor) <= len(opciones):
+            return int(valor) - 1
+        print("  Opción inválida, intentá de nuevo.")
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +255,15 @@ def procesar(proveedor: str, execute: bool):
 
     wb = openpyxl.load_workbook(ARCHIVO_PATH)  # sin data_only=True
 
+    # Validación fail-fast del formato de RegistroCambios: se corre apenas
+    # cargado el libro y ANTES del backup, para no dejar un backup inútil ni
+    # apilar filas desalineadas bajo encabezados que no corresponden.
+    try:
+        registro.validar_encabezados(wb)
+    except registro.RegistroError as e:
+        print(f"\nERROR: {e}")
+        sys.exit(1)
+
     if HOJA_ENTRADA not in wb.sheetnames:
         print(f"ERROR: no se encontró la hoja de entrada '{HOJA_ENTRADA}'.")
         sys.exit(1)
@@ -207,8 +300,13 @@ def procesar(proveedor: str, execute: bool):
             avisos_formato.append((norm, valor_original))
 
     codigos_no_encontrados = set(precios_parsed.keys())
-    registro_rows = []  # lista de dicts con REGISTRO_HEADERS
+    detalle_corrida = (
+        f"Proveedor: {proveedor} | Fórmula: "
+        + ", ".join(f"{k}={v}" for k, v in params.items())
+    )
+    corrida = registro.RegistroCorrida(registro.TIPO_PRECIOS, detalle_corrida)
     dry_run_detalle = []  # lista de dicts con detalle original -> parseado (solo dry-run)
+    cambios_precio = []  # lista para la revisión automática de anomalías (IA)
     resumen_por_hoja = {}  # hoja -> {"precios": n, "fechas": n}
     total_coincidencias = 0
 
@@ -223,6 +321,7 @@ def procesar(proveedor: str, execute: bool):
         col_marca = find_header_col(ws, "Marca")
         col_precio_iva = find_header_col(ws, "PrecioConIVA")
         col_fecha = find_header_col(ws, "FechaActualizacion")
+        col_nombre = find_header_col(ws, "NombreProducto")
 
         if col_codfac is None or col_precio_iva is None or col_fecha is None:
             # Esta hoja no es una hoja de destino válida para este prompt
@@ -249,6 +348,7 @@ def procesar(proveedor: str, execute: bool):
 
             fila_num = celda_codfac.row
             marca_valor = row[col_marca - 1].value if col_marca else None
+            nombre_valor = row[col_nombre - 1].value if col_nombre else None
 
             celda_precio_iva = row[col_precio_iva - 1]
             celda_fecha = row[col_fecha - 1]
@@ -256,16 +356,26 @@ def procesar(proveedor: str, execute: bool):
             valor_anterior_precio = celda_precio_iva.value
             valor_anterior_fecha = celda_fecha.value
 
-            registro_rows.append({
-                "Hoja": sheet_name, "Fila": fila_num, "Codigo": match,
-                "Marca": marca_valor, "Columna": "PrecioConIVA",
-                "ValorAnterior": valor_anterior_precio, "ValorNuevo": precio_nuevo,
+            cambios_precio.append({
+                "hoja": sheet_name,
+                "codigo": match,
+                "producto": nombre_valor,
+                "valor_anterior": valor_anterior_precio,
+                "valor_nuevo": precio_nuevo,
             })
-            registro_rows.append({
-                "Hoja": sheet_name, "Fila": fila_num, "Codigo": match,
-                "Marca": marca_valor, "Columna": "FechaActualizacion",
-                "ValorAnterior": valor_anterior_fecha, "ValorNuevo": fecha_hoy,
-            })
+
+            # Una fila de registro por cada celda modificada (regla 8):
+            # PrecioConIVA y FechaActualizacion.
+            corrida.agregar(
+                hoja=sheet_name, fila=fila_num, nombre_producto=nombre_valor,
+                marca=marca_valor, columna="PrecioConIVA",
+                valor_anterior=valor_anterior_precio, valor_nuevo=precio_nuevo,
+            )
+            corrida.agregar(
+                hoja=sheet_name, fila=fila_num, nombre_producto=nombre_valor,
+                marca=marca_valor, columna="FechaActualizacion",
+                valor_anterior=valor_anterior_fecha, valor_nuevo=fecha_hoy,
+            )
 
             if not execute:
                 dry_run_detalle.append({
@@ -296,25 +406,17 @@ def procesar(proveedor: str, execute: bool):
             ws_hoja1.cell(row=i, column=5).value = codigo
 
     # ---- RegistroCambios ----
-    if execute:
-        if HOJA_REGISTRO not in wb.sheetnames:
-            ws_reg = wb.create_sheet(HOJA_REGISTRO)
-            ws_reg.append(REGISTRO_HEADERS)
-        else:
-            ws_reg = wb[HOJA_REGISTRO]
-
-        for r in registro_rows:
-            ws_reg.append([r[h] for h in REGISTRO_HEADERS])
-
-        # Verificación de conteo obligatoria
-        celdas_modificadas = total_coincidencias * 2  # precio + fecha por cada match
-        if len(registro_rows) != celdas_modificadas:
-            print(
-                "ERROR DE INTEGRIDAD: la cantidad de filas de registro "
-                f"({len(registro_rows)}) no coincide con la cantidad de celdas "
-                f"modificadas ({celdas_modificadas}). No se guarda el archivo."
-            )
-            sys.exit(1)
+    # Verificación de conteo obligatoria (regla 8): 2 celdas por match
+    # (PrecioConIVA + FechaActualizacion). Se corre antes de escribir, y si
+    # falla se aborta sin guardar.
+    celdas_modificadas = total_coincidencias * 2
+    try:
+        corrida.verificar_conteo(celdas_modificadas)
+        if execute:
+            corrida.escribir(wb)
+    except registro.RegistroError as e:
+        print(f"\n{e}")
+        sys.exit(1)
 
     # ---------------------------------------------------------------
     # Resumen
@@ -341,6 +443,27 @@ def procesar(proveedor: str, execute: bool):
         for norm, valor_original in avisos_formato_ordenados:
             print(f"  - Código '{norm}': valor original {valor_original!r}")
 
+    # ---- Revisión automática de posibles anomalías (estadística + IA) ----
+    print("\n--- Revisión automática de posibles anomalías ---")
+    analisis_ia, aviso_ia = revisar_cambios_con_ia(
+        cambios_precio,
+        contexto_extra=(
+            f"Actualización de precios (Tipo 1) para el proveedor '{proveedor}'. "
+            f"Fórmula: {params}."
+        ),
+    )
+    if aviso_ia:
+        print(aviso_ia)
+    if analisis_ia:
+        print(analisis_ia)
+    detalle_marcados = formatear_items_marcados(cambios_precio)
+    if detalle_marcados:
+        print(detalle_marcados)
+    imprimir_items_marcados_json(cambios_precio)
+
+    if not execute:
+        registro.imprimir_previsualizacion(corrida)
+
     if not execute and dry_run_detalle:
         print("\nDetalle de filas a modificar (Original -> Parseado):")
         for item in dry_run_detalle:
@@ -354,25 +477,79 @@ def procesar(proveedor: str, execute: bool):
         print(f"\nBackup creado en: {backup_path}")
         wb.save(ARCHIVO_PATH)
         print(f"Archivo guardado: {ARCHIVO_PATH}")
-        print(f"Filas agregadas a RegistroCambios: {len(registro_rows)}")
+        print(f"Filas agregadas a {HOJA_REGISTRO}: {len(corrida)}")
     else:
         print(
             "\nEsto fue una simulación (dry-run). No se modificó el archivo ni se "
-            "creó backup. Para ejecutar los cambios reales, correr de nuevo con --execute."
+            "creó backup."
         )
+
+    return total_coincidencias
+
+
+def modo_guiado():
+    """Flujo guiado por menú: elegir proveedor con flechas, correr dry-run
+    automáticamente y preguntar con otro menú si se confirma la ejecución real."""
+    proveedores = listar_proveedores()
+    if not proveedores:
+        sys.exit(
+            "ERROR: no se encontró ningún proveedor con NOTAS.md dentro de "
+            f"'{PROVEEDORES_DIR}'."
+        )
+
+    idx = menu_seleccionar(proveedores, "Elegí el proveedor")
+    if idx is None:
+        print("\nOperación cancelada. No se modificó nada.")
+        return
+    proveedor = proveedores[idx]
+
+    print(f"\nCorriendo vista previa (dry-run) para '{proveedor}'...")
+    coincidencias = procesar(proveedor, execute=False)
+
+    if coincidencias == 0:
+        print("\nNo hay ninguna coincidencia para modificar. No hace falta ejecutar nada.")
+        return
+
+    opciones = [
+        "Sí, aplicar estos cambios reales al archivo",
+        "No, salir sin modificar nada",
+    ]
+    idx_confirm = menu_seleccionar(
+        opciones, "¿Confirmás aplicar estos cambios al archivo real?"
+    )
+    if idx_confirm == 0:
+        print(f"\nAplicando cambios reales para '{proveedor}'...")
+        procesar(proveedor, execute=True)
+    else:
+        print("\nNo se aplicó ningún cambio. Podés volver a correr el script cuando quieras.")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Actualiza precios (Tipo 1) para un proveedor según su NOTAS.md."
     )
-    parser.add_argument("proveedor", help="Nombre de la carpeta del proveedor en proveedores/")
+    parser.add_argument(
+        "proveedor",
+        nargs="?",
+        default=None,
+        help=(
+            "Nombre de la carpeta del proveedor en proveedores/. "
+            "Si se omite, se abre el menú guiado."
+        ),
+    )
     parser.add_argument(
         "--execute",
         action="store_true",
         help="Ejecuta los cambios reales (por defecto corre en modo dry-run).",
     )
     args = parser.parse_args()
+
+    if args.proveedor is None:
+        # Sin argumentos: modo guiado con menú de flechas.
+        modo_guiado()
+        return
+
+    # Con argumentos explícitos: comportamiento clásico por línea de comandos.
     procesar(args.proveedor, args.execute)
 
 
