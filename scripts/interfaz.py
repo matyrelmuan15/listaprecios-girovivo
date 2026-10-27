@@ -146,6 +146,9 @@ class InterfazGiroVivo:
 
         self.pantalla_actual = None
         self.proceso_en_curso = False
+        # Identificador de la última carga de marcas de "Actualizar fecha":
+        # una carga cuyo id ya no coincide pertenece a una pantalla anterior.
+        self.af_carga_id = 0
 
         # Estado de la sincronización con GitHub. La pantalla de inicio se
         # destruye en cada navegación, así que el texto de la línea de
@@ -1306,6 +1309,9 @@ class InterfazGiroVivo:
             return
         self.af_marcas_cargando = True
         self.af_dryrun_ok = False
+        self.af_carga_id += 1
+        id_carga = self.af_carga_id
+        lista = self.lista_af_marcas
         seleccionadas_actuales = {
             self.lista_af_marcas.get(i) for i in self.lista_af_marcas.curselection()
         }
@@ -1335,6 +1341,11 @@ class InterfazGiroVivo:
         threading.Thread(target=trabajo, daemon=True).start()
 
         def sondear():
+            # Se salió de la pantalla o ya hay una carga más nueva: se descarta
+            # el resultado sin tocar widgets ni af_marcas_cargando (que ahora
+            # pertenece a la carga nueva o se reinicia al volver a entrar).
+            if id_carga != self.af_carga_id or not self._existe(lista):
+                return
             try:
                 item = cola.get_nowait()
             except queue.Empty:
@@ -1356,6 +1367,8 @@ class InterfazGiroVivo:
         sondear()
 
     def _af_llenar_lista_marcas(self, marcas):
+        if not self._existe(self.lista_af_marcas):
+            return
         self.lista_af_marcas.delete(0, tk.END)
         for i, m in enumerate(marcas):
             self.lista_af_marcas.insert(tk.END, m)
@@ -1372,6 +1385,8 @@ class InterfazGiroVivo:
         self._af_actualizar_estado_botones()
 
     def _af_mostrar_error_marcas(self, mensaje):
+        if not self._existe(self.lista_af_marcas):
+            return
         self.lista_af_marcas.delete(0, tk.END)
         self.lbl_af_estado_marcas.configure(
             text="No se pudo cargar la lista de marcas (ver detalle abajo).", fg=COLOR_ERROR
@@ -1385,6 +1400,8 @@ class InterfazGiroVivo:
         self._af_actualizar_estado_botones()
 
     def _af_actualizar_estado_botones(self):
+        if not self._existe(self.lista_af_marcas):
+            return  # la pantalla se destruyó (p. ej. un callback que llega tarde)
         hay_seleccion = bool(self.lista_af_marcas.curselection())
         ocupado = self.proceso_en_curso or self.sync_en_curso or self.af_marcas_cargando
         self.btn_af_preview.configure(state="normal" if hay_seleccion and not ocupado else "disabled")
