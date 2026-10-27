@@ -273,16 +273,36 @@ class InterfazGiroVivo:
             anchor="w", pady=(2, 6)
         )
 
+        # Encabezado fijo: estado de sincronización (con el botón a la derecha)
+        # y enlaces. Siempre visible; solo el área de tarjetas se desplaza.
         texto_sync, color_sync = self.estado_sync
-        self.lbl_estado_sync = tk.Label(
-            marco, text=texto_sync, bg=COLOR_FONDO, fg=color_sync, font=FUENTE_SUBTITULO,
-            anchor="w", justify="left", wraplength=820,
+        fila_estado = ttk.Frame(marco)
+        fila_estado.pack(fill="x", pady=(0, 8))
+        self.btn_sync_ahora = ttk.Button(
+            fila_estado, text="Sincronizar ahora", style="Normal.TButton",
+            command=self._sync_manual,
         )
-        self.lbl_estado_sync.pack(anchor="w", fill="x", pady=(0, 14))
+        self.btn_sync_ahora.pack(side="right", padx=(12, 0))
+        self.lbl_estado_sync = tk.Label(
+            fila_estado, text=texto_sync, bg=COLOR_FONDO, fg=color_sync, font=FUENTE_SUBTITULO,
+            anchor="w", justify="left", wraplength=620,
+        )
+        self.lbl_estado_sync.pack(side="left", fill="x", expand=True)
+
+        fila_enlaces = ttk.Frame(marco)
+        fila_enlaces.pack(fill="x", pady=(0, 14))
+        self._enlace(
+            fila_enlaces, "Ver proyecto en Claude", self._abrir_proyecto_claude
+        ).pack(side="left")
+        self._enlace(
+            fila_enlaces, "Abrir carpeta de proveedores", self._abrir_carpeta_proveedores
+        ).pack(side="left", padx=(24, 0))
+        self._enlace(
+            fila_enlaces, "Abrir Excel (Hoja1)", self._abrir_excel_hoja1
+        ).pack(side="left", padx=(24, 0))
 
         self.botones_tarjetas = []
-        fila_tarjetas = ttk.Frame(marco)
-        fila_tarjetas.pack(fill="x")
+        fila_tarjetas = self._crear_zona_desplazable(marco)
         fila_tarjetas.columnconfigure(0, weight=1)
         fila_tarjetas.columnconfigure(1, weight=1)
 
@@ -327,25 +347,47 @@ class InterfazGiroVivo:
             accion=self.mostrar_actualizar_precio_dolar,
         )
 
-        fila_enlaces = ttk.Frame(marco)
-        fila_enlaces.pack(fill="x", pady=(24, 0))
-        self._enlace(
-            fila_enlaces, "Ver proyecto en Claude", self._abrir_proyecto_claude
-        ).pack(side="left")
-        self._enlace(
-            fila_enlaces, "Abrir carpeta de proveedores", self._abrir_carpeta_proveedores
-        ).pack(side="left", padx=(24, 0))
-        self._enlace(
-            fila_enlaces, "Abrir Excel (Hoja1)", self._abrir_excel_hoja1
-        ).pack(side="left", padx=(24, 0))
-        self.btn_sync_ahora = ttk.Button(
-            fila_enlaces, text="Sincronizar ahora", style="Normal.TButton",
-            command=self._sync_manual,
-        )
-        self.btn_sync_ahora.pack(side="right")
-
         self._refrescar_controles_inicio()
         return marco
+
+    def _crear_zona_desplazable(self, marco):
+        """Área vertical desplazable dentro de `marco`; devuelve el frame
+        interior donde van las tarjetas. La barra y la rueda del mouse solo
+        actúan si el contenido no entra en la ventana."""
+        zona = tk.Frame(marco, bg=COLOR_FONDO)
+        zona.pack(fill="both", expand=True)
+        zona.rowconfigure(0, weight=1)
+        zona.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(zona, bg=COLOR_FONDO, highlightthickness=0, yscrollincrement=20)
+        barra = ttk.Scrollbar(zona, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=barra.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        barra.grid(row=0, column=1, sticky="ns")
+
+        interior = ttk.Frame(canvas)
+        ventana = canvas.create_window((0, 0), window=interior, anchor="nw")
+
+        def ajustar(_evento=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            if interior.winfo_reqheight() > canvas.winfo_height():
+                barra.grid()
+            else:
+                barra.grid_remove()
+                canvas.yview_moveto(0)
+
+        def ajustar_ancho(evento):
+            canvas.itemconfigure(ventana, width=evento.width)
+            ajustar()
+
+        def rueda(evento):
+            if self._existe(canvas) and interior.winfo_reqheight() > canvas.winfo_height():
+                canvas.yview_scroll(int(-evento.delta / 120) * 2, "units")
+
+        interior.bind("<Configure>", ajustar)
+        canvas.bind("<Configure>", ajustar_ancho)
+        canvas.bind_all("<MouseWheel>", rueda)
+        marco.bind("<Destroy>", lambda e: self.root.unbind_all("<MouseWheel>") if e.widget is marco else None)
+        return interior
 
     def _enlace(self, padre, texto, accion):
         etiqueta = tk.Label(
