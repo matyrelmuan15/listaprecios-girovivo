@@ -17,6 +17,7 @@ Formato único (10 columnas, en este orden exacto):
 
     Fecha            fecha y hora de la corrida, texto dd/mm/aaaa hh:mm
     TipoOperacion    "Precios" (Tipo 1) | "Dolar" (Tipo 2) | "Fecha" (Tipo 3)
+                     | "PrecioDolar" (Tipo 4) | "Formulas" (verificar_formulas.py)
     Hoja             nombre de la hoja destino
     Fila             número de fila modificada
     NombreProducto   valor de la columna NombreProducto de esa fila
@@ -25,11 +26,15 @@ Formato único (10 columnas, en este orden exacto):
                      FechaActualizacion)
     ValorAnterior    valor previo de esa celda puntual
     ValorNuevo       valor nuevo de esa celda puntual
-    Detalle          contexto de la corrida (proveedor y fórmula en Tipo 1;
+    Detalle          contexto de la corrida (proveedor, fórmula y dólar
+                     opcional en Tipo 1;
                      modo, marcas y rango de fechas en Tipo 2 y 3)
 
 Granularidad (regla 8 del CLAUDE.md): una fila de registro por cada CELDA
-modificada. Tipo 1 -> 2 filas por producto. Tipo 2 -> 3. Tipo 3 -> 1.
+modificada. Tipo 1 -> 2 filas por producto (3 si se indica --dolar y la hoja
+tiene DolarReferencia). Tipo 2 -> 2 (DolarReferencia +
+FechaActualizacion; 1 si no se toca la fecha). Tipo 3 -> 1. Tipo 4 -> 3
+(PrecioConIVA + DolarReferencia + FechaActualizacion; 2 si no se toca la fecha).
 
 Uso típico desde un script:
 
@@ -65,7 +70,9 @@ REGISTRO_HEADERS = [
 # Valores admitidos para la columna TipoOperacion.
 TIPO_PRECIOS = "Precios"
 TIPO_DOLAR = "Dolar"
+TIPO_PRECIO_DOLAR = "PrecioDolar"
 TIPO_FECHA = "Fecha"
+TIPO_FORMULAS = "Formulas"
 
 
 class RegistroError(Exception):

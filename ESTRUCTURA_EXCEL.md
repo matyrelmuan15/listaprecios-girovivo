@@ -66,7 +66,7 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 - Filas con datos: 0. La hoja se rehízo el 21/08/2026 con `scripts/migrar_registro.py`, que descartó las 1403 filas de historial previo.
 - `max_row`: 1 (solo la fila de encabezados)
 - El formato lo define `scripts/registro.py` y lo comparten los tres scripts (Tipo 1, 2 y 3). Antes de escribir, cada uno valida que los encabezados coincidan con esos 10 y aborta sin guardar si no.
-- Granularidad: una fila por cada celda modificada. Tipo 1 escribe 2 filas por producto (`PrecioConIVA` + `FechaActualizacion`), Tipo 2 escribe 3 (suma `DolarReferencia`) y Tipo 3 escribe 1.
+- Granularidad: una fila por cada celda modificada. Tipo 1 escribe 2 filas por producto (`PrecioConIVA` + `FechaActualizacion`), o 3 si se indica el dólar opcional (`--dolar`) y la hoja tiene `DolarReferencia` (ese valor se escribe en las mismas filas actualizadas; las hojas sin la columna se informan con un aviso), Tipo 2 (asignar dólar) escribe 2 (`DolarReferencia` + `FechaActualizacion`), Tipo 3 escribe 1 y Tipo 4 (actualizar precio por dólar) escribe 3 (`PrecioConIVA` + `DolarReferencia` + `FechaActualizacion`). Si se elige no modificar la fecha, Tipo 2 y Tipo 4 escriben una fila menos.
 
 **Historial previo (descartado del libro, preservado en `backup/`):** hasta la migración la hoja tenía los encabezados `Hoja`, `Tabla/Producto (SKU)`, `FechaActualizacion`, `Valor anterior DolarReferencia`, `Valor nuevo`, pero convivían debajo tres formatos de distinto ancho (4-6, 7 y 9 columnas) más un bloque de resumen manual, porque cada script definía sus propios encabezados y ninguno los reescribía. El contenido completo quedó en `backup/Lista de Precios Giro Vivo 2026_20260821_114842.xlsx`.
 

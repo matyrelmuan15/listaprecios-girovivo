@@ -1,9 +1,9 @@
 # Proveedor: Bontey
 
 ## Fórmula de precio (Tipo 1 — actualización de precios)
-PrecioConIVA = Precio (Hoja1) + 81%
+PrecioConIVA = Precio (Hoja1) + 80% + 21% de IVA (compuesto, aplicado en cadena, no equivalente a sumar 101% directo)
 
-Ejemplo: Precio en Hoja1 = 1000 → PrecioConIVA = 1000 * 1.81 = 1810.00
+Ejemplo: Precio en Hoja1 = 1000 → 1000 * 1.80 = 1800.00 → 1800.00 * 1.21 = 2178.00
 
 ## Reglas específicas de este proveedor
 Ninguna adicional a las generales del `CLAUDE.md`. Aplica el flujo estándar de Tipo 1:
@@ -13,5 +13,5 @@ Ninguna adicional a las generales del `CLAUDE.md`. Aplica el flujo estándar de 
 - Registra cada celda modificada en `RegistroCambios`.
 
 ## Parámetros para el script (uso interno — no modificar el formato de esta sección)
-tipo: porcentaje_simple
-porcentaje: 0.81
+tipo: porcentaje_compuesto
+pasos: 0.80, 0.21

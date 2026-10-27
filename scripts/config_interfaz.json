@@ -1,25 +1,23 @@
 {
-  "proveedor": "giant",
+  "proveedor": "new_evolution",
   "actualizar_fecha": {
     "marcas": [
       "CLASSIQUE"
     ],
-    "modo": "hoy",
-    "fecha_dia": "12",
-    "fecha_mes": "08",
+    "modo": "especifica",
+    "fecha_dia": "20",
+    "fecha_mes": "10",
     "fecha_anio": "2026"
   },
   "asignar_dolar": {
-    "modo": "marca",
-    "marcas": [
-      "DAL SANTO"
-    ],
-    "precio_actualizado": "1515",
-    "desde_dia": "01",
-    "desde_mes": "08",
+    "modo": "fecha",
+    "marcas": [],
+    "precio_actualizado": "1535",
+    "desde_dia": "09",
+    "desde_mes": "10",
     "desde_anio": "2026",
-    "hasta_dia": "20",
-    "hasta_mes": "08",
+    "hasta_dia": "09",
+    "hasta_mes": "10",
     "hasta_anio": "2026"
   }
 }

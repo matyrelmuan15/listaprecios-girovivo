@@ -28,6 +28,11 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
    2. Dry-run / simulación con resumen (sin escribir nada).
    3. Ejecución real — solo tras aprobación explícita del usuario.
 
+## Fórmulas obligatorias
+- `PrecioContado` = `='<Hoja>'!$H6-('<Hoja>'!$H6*15/100)` y `PrecioSinIVA` = `='<Hoja>'!$H6/1.21`, donde la letra sale del encabezado `PrecioConIVA`.
+- Tipo 1 y Tipo 4 reponen estas fórmulas en las filas que actualizan (vía `formulas.py`) y lo registran en `RegistroCambios`.
+- `verificar_formulas.py` revisa y repara todo el libro (y redondea `PrecioConIVA` a 2 decimales).
+
 ## Decisión de arquitectura
 No agrupar proveedores por fórmula compartida, aunque hoy coincida el porcentaje entre dos o más. Cada proveedor tiene su propia carpeta y `NOTAS.md` independiente, porque las fórmulas pueden cambiar de forma desacoplada con el tiempo.
 
@@ -50,10 +55,14 @@ ListaPreciosGiroVivo/
 │   └── <proveedor>/
 │       └── NOTAS.md
 └── scripts/
-    ├── actualizar_precios.py   (Tipo 1 — precios por match de códigos)
-    ├── asignar_dolar.py        (Tipo 2 — recálculo por valor de dólar)
+    ├── actualizar_precios.py   (Tipo 1 — precios por match de códigos; con --dolar opcional también escribe DolarReferencia en las filas actualizadas)
+    ├── asignar_dolar.py        (Tipo 2 — asigna DolarReferencia + fecha, NO recalcula precios)
+    ├── actualizar_precio_dolar.py (Tipo 4 — recalcula PrecioConIVA = precio ÷ DolarReferencia actual × dólar nuevo)
     ├── actualizar_fecha.py     (Tipo 3 — solo FechaActualizacion)
     ├── registro.py             (formato único de RegistroCambios, compartido)
+    ├── formulas.py             (verificación de fórmulas Contado/SinIVA, compartido)
+    ├── dolar.py                (regla única de validación del valor de dólar, compartido)
+    ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro)
     ├── migrar_registro.py      (migración de un solo uso de RegistroCambios)
     ├── ia_revision.py          (revisión automática de anomalías)
     └── interfaz.py             (interfaz gráfica de escritorio)

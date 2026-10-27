@@ -5,15 +5,19 @@ asignar_dolar.py
 -----------------
 Script genérico Tipo 2 del proyecto "Lista de Precios Giro Vivo".
 
-Recalcula "PrecioConIVA" a partir de un nuevo valor de dólar y actualiza
-"DolarReferencia" y "FechaActualizacion", según tres modos posibles:
+Asigna un nuevo valor a "DolarReferencia" y actualiza "FechaActualizacion",
+SIN recalcular "PrecioConIVA" (los precios no se tocan). Para recalcular el
+precio a partir del dólar se usa actualizar_precio_dolar.py (Tipo 4).
+Filtra según tres modos posibles.
+La fecha que se escribe en "FechaActualizacion" se elige con
+--fecha-registro dd/mm/aaaa (si se omite, se usa la fecha de hoy), o se
+deja sin cambios con --no-tocar-fecha:
 
   - marca        : filtra por columna "Marca" (una o varias)
   - fecha         : filtra por rango de "FechaActualizacion" (dd/mm/aaaa)
   - marca_fecha   : combina ambos filtros (deben cumplirse los dos)
 
-Fórmula aplicada fila por fila:
-  nuevo PrecioConIVA = (PrecioConIVA actual / DolarReferencia actual) * PRECIO_ACTUALIZADO
+No se aplica ninguna fórmula: DolarReferencia recibe el valor indicado tal cual.
 
 MODO GUIADO (recomendado)
 --------------------------
@@ -35,12 +39,12 @@ Reglas seguidas (según CLAUDE.md del proyecto):
   - Columnas localizadas siempre por nombre de encabezado exacto (fila 1 de cada hoja).
   - Se abre el libro SIN data_only=True para escribir, para no destruir fórmulas
     preexistentes.
-  - Valores escritos siempre fijos (no fórmulas): precio como número (2 decimales
-    máx.), DolarReferencia como número, fecha como texto dd/mm/aaaa.
+  - Valores escritos siempre fijos (no fórmulas): DolarReferencia como número,
+    fecha como texto dd/mm/aaaa. PrecioConIVA no se modifica nunca.
   - Se excluye siempre la hoja "Marcas Actualización Dinámica".
   - Se recorren todas las hojas del libro dinámicamente.
   - Flujo obligatorio en 2 pasos: primero DRY-RUN (sin --confirmar), que muestra
-    el detalle por hoja y un ejemplo de cálculo sin escribir nada; recién con
+    el detalle por hoja y un ejemplo sin escribir nada; recién con
     --confirmar (o confirmando en el menú guiado) se aplica el backup y los
     cambios reales.
 
@@ -71,11 +75,8 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 import registro
-from ia_revision import (
-    formatear_items_marcados,
-    imprimir_items_marcados_json,
-    revisar_cambios_con_ia,
-)
+from dolar import validar_dolar
+from ia_revision import imprimir_items_marcados_json
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -324,7 +325,7 @@ def hacer_backup(archivo_path):
 
 def procesar(args, interactivo=False):
     modo = args.modo
-    requeridas = [COL_PRECIO, COL_DOLAR, COL_FECHA]
+    requeridas = [COL_DOLAR, COL_FECHA]
     if modo in ("marca", "marca_fecha"):
         requeridas.append(COL_MARCA)
 
@@ -345,7 +346,22 @@ def procesar(args, interactivo=False):
                   "en modo 'marca' o 'marca_fecha'.")
 
     precio_actualizado = args.precio_actualizado
-    hoy_texto = datetime.date.today().strftime("%d/%m/%Y")
+
+    # Fecha a escribir en FechaActualizacion: la elegida (--fecha-registro),
+    # hoy si no se indicó ninguna, o None si se pidió no tocar la columna.
+    no_tocar_fecha = bool(getattr(args, "no_tocar_fecha", False))
+    fecha_registro_arg = getattr(args, "fecha_registro", None)
+    if no_tocar_fecha and fecha_registro_arg:
+        sys.exit("ERROR: --fecha-registro y --no-tocar-fecha no se pueden usar juntas.")
+    if no_tocar_fecha:
+        fecha_registro_texto = None
+    elif fecha_registro_arg:
+        fecha_reg = parse_fecha(fecha_registro_arg)
+        if fecha_reg is None:
+            sys.exit("ERROR: --fecha-registro debe tener formato dd/mm/aaaa.")
+        fecha_registro_texto = fecha_reg.strftime("%d/%m/%Y")
+    else:
+        fecha_registro_texto = datetime.date.today().strftime("%d/%m/%Y")
 
     wb = load_workbook(args.archivo, data_only=False)
 
@@ -359,7 +375,6 @@ def procesar(args, interactivo=False):
 
     reporte = []          # detalle por hoja para el dry-run
     cambios_a_aplicar = []  # lista de dicts con todo lo necesario para escribir + registrar
-    ejemplo_global = None
 
     for ws in wb.worksheets:
         if ws.title == SHEET_EXCLUDE or ws.title == SHEET_REGISTRO:
@@ -376,26 +391,24 @@ def procesar(args, interactivo=False):
             })
             continue
 
-        c_precio = col_map[COL_PRECIO]
         c_dolar = col_map[COL_DOLAR]
         c_fecha = col_map[COL_FECHA]
         c_marca = col_map.get(COL_MARCA)
 
         candidatas = 0
-        omitidas_dolar = 0
         omitidas_fecha_invalida = 0
         fuera_de_rango = 0
         ejemplo_hoja = None
 
         for row_idx in range(2, ws.max_row + 1):
-            precio_actual = ws.cell(row=row_idx, column=c_precio).value
             dolar_actual = ws.cell(row=row_idx, column=c_dolar).value
             fecha_actual_raw = ws.cell(row=row_idx, column=c_fecha).value
             marca_actual = ws.cell(row=row_idx, column=c_marca).value if c_marca else None
             nombre_actual = ws.cell(row=row_idx, column=nombre_col).value if nombre_col else ""
 
-            # Saltear filas totalmente vacías en la columna clave de precio
-            if precio_actual is None and dolar_actual is None and not marca_actual and not fecha_actual_raw:
+            # Saltear filas vacías (sin dólar, marca, fecha ni nombre)
+            if (dolar_actual is None and not marca_actual and not fecha_actual_raw
+                    and not (str(nombre_actual).strip() if nombre_actual else "")):
                 continue
 
             # --- Filtro de marca ---
@@ -404,7 +417,6 @@ def procesar(args, interactivo=False):
                     continue
 
             # --- Filtro de fecha ---
-            fecha_valida = None
             if modo in ("fecha", "marca_fecha"):
                 fecha_valida = parse_fecha(fecha_actual_raw)
                 if fecha_valida is None:
@@ -416,60 +428,41 @@ def procesar(args, interactivo=False):
 
             candidatas += 1
 
-            # --- Chequeo DolarReferencia vacía o cero ---
-            if es_vacio_o_cero(dolar_actual):
-                omitidas_dolar += 1
-                continue
-
-            try:
-                precio_f = a_float(precio_actual)
-                dolar_f = a_float(dolar_actual)
-            except (TypeError, ValueError):
-                omitidas_dolar += 1
-                continue
-
-            nuevo_precio = round((precio_f / dolar_f) * precio_actualizado, 2)
-
             cambio = {
                 "hoja": ws.title,
                 "fila": row_idx,
                 "nombre_producto": nombre_actual,
                 "marca": marca_actual,
                 "fecha_anterior": fecha_actual_raw,
-                "precio_anterior": precio_f,
-                "dolar_anterior": dolar_f,
-                "precio_nuevo": nuevo_precio,
+                "dolar_anterior": dolar_actual,
                 "dolar_nuevo": precio_actualizado,
-                "fecha_nueva": hoy_texto,
-                "col_precio": c_precio,
+                "fecha_nueva": fecha_registro_texto,
                 "col_dolar": c_dolar,
                 "col_fecha": c_fecha,
             }
             cambios_a_aplicar.append(cambio)
-
             if ejemplo_hoja is None:
                 ejemplo_hoja = cambio
-            if ejemplo_global is None:
-                ejemplo_global = cambio
 
         reporte.append({
             "hoja": ws.title,
             "saltada": False,
             "candidatas": candidatas,
-            "omitidas_dolar": omitidas_dolar,
             "omitidas_fecha_invalida": omitidas_fecha_invalida,
             "fuera_de_rango": fuera_de_rango,
             "ejemplo": ejemplo_hoja,
         })
 
-    imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_desde, fecha_hasta)
+    imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_desde, fecha_hasta,
+                     fecha_registro_texto)
 
     # --- Filas de registro: una por cada CELDA modificada (regla 8) ---
-    # En Tipo 2 son 3 por producto: PrecioConIVA, DolarReferencia y
-    # FechaActualizacion. Se arman también en dry-run, para poder mostrarlas.
+    # En Tipo 2 son 2 por producto: DolarReferencia y FechaActualizacion
+    # (1 si se eligió no tocar la fecha). PrecioConIVA no se toca.
     corrida = registro.RegistroCorrida(
         registro.TIPO_DOLAR,
-        construir_detalle(modo, marcas_filtro, fecha_desde, fecha_hasta, precio_actualizado),
+        construir_detalle(modo, marcas_filtro, fecha_desde, fecha_hasta, precio_actualizado,
+                          fecha_registro_texto),
     )
     for cambio in cambios_a_aplicar:
         comunes = {
@@ -478,51 +471,22 @@ def procesar(args, interactivo=False):
             "nombre_producto": cambio["nombre_producto"],
             "marca": cambio["marca"],
         }
-        corrida.agregar(columna=COL_PRECIO,
-                        valor_anterior=cambio["precio_anterior"],
-                        valor_nuevo=cambio["precio_nuevo"], **comunes)
         corrida.agregar(columna=COL_DOLAR,
                         valor_anterior=cambio["dolar_anterior"],
                         valor_nuevo=cambio["dolar_nuevo"], **comunes)
-        corrida.agregar(columna=COL_FECHA,
-                        valor_anterior=cambio["fecha_anterior"],
-                        valor_nuevo=cambio["fecha_nueva"], **comunes)
+        if cambio["fecha_nueva"] is not None:
+            corrida.agregar(columna=COL_FECHA,
+                            valor_anterior=cambio["fecha_anterior"],
+                            valor_nuevo=cambio["fecha_nueva"], **comunes)
+
+    # Sin recálculo de precios no hay anomalías de precio que revisar:
+    # la tabla de ítems marcados de la interfaz queda vacía.
+    imprimir_items_marcados_json([])
 
     if not cambios_a_aplicar:
         print("\nNo hay ninguna fila para modificar. No se hizo backup ni se escribió nada.")
-        imprimir_items_marcados_json([])
         return
 
-    # ---- Revisión automática de posibles anomalías (estadística + IA) ----
-    cambios_para_ia = [
-        {
-            "hoja": c["hoja"],
-            "codigo": c["fila"],
-            "producto": c["nombre_producto"],
-            "valor_anterior": c["precio_anterior"],
-            "valor_nuevo": c["precio_nuevo"],
-        }
-        for c in cambios_a_aplicar
-    ]
-    print("\n--- Revisión automática de posibles anomalías ---")
-    analisis_ia, aviso_ia = revisar_cambios_con_ia(
-        cambios_para_ia,
-        contexto_extra=(
-            f"Asignación de nuevo valor de dólar (Tipo 2). Modo: {modo}. "
-            f"Nuevo valor de dólar (DolarReferencia): {precio_actualizado}."
-        ),
-    )
-    if aviso_ia:
-        print(aviso_ia)
-    if analisis_ia:
-        print(analisis_ia)
-    detalle_marcados = formatear_items_marcados(cambios_para_ia)
-    if detalle_marcados:
-        print(detalle_marcados)
-    imprimir_items_marcados_json(cambios_para_ia)
-
-    # Se muestra antes de pedir la confirmación, para que en el modo guiado
-    # se pueda revisar cómo quedaría el registro antes de decidir.
     registro.imprimir_previsualizacion(corrida)
 
     confirmado = args.confirmar
@@ -543,19 +507,20 @@ def procesar(args, interactivo=False):
     destino_backup = hacer_backup(args.archivo)
     print(f"\nBackup creado en: {destino_backup}")
 
-    # --- Aplicar cambios celda por celda ---
+    # --- Aplicar cambios celda por celda (solo DolarReferencia y fecha) ---
     for cambio in cambios_a_aplicar:
         ws = wb[cambio["hoja"]]
-        ws.cell(row=cambio["fila"], column=cambio["col_precio"]).value = cambio["precio_nuevo"]
         ws.cell(row=cambio["fila"], column=cambio["col_dolar"]).value = cambio["dolar_nuevo"]
-        ws.cell(row=cambio["fila"], column=cambio["col_fecha"]).value = cambio["fecha_nueva"]
+        if cambio["fecha_nueva"] is not None:
+            ws.cell(row=cambio["fila"], column=cambio["col_fecha"]).value = cambio["fecha_nueva"]
 
     # --- Registrar en RegistroCambios ---
-    # Verificación de conteo obligatoria (regla 8): 3 celdas por producto
-    # (PrecioConIVA + DolarReferencia + FechaActualizacion). Si no coincide
-    # se aborta sin guardar, así que el archivo real queda intacto.
+    # Verificación de conteo obligatoria (regla 8): 2 celdas por producto
+    # (DolarReferencia + FechaActualizacion), o 1 si no se toca la fecha.
+    # Si no coincide se aborta sin guardar: el archivo real queda intacto.
+    celdas_por_producto = 1 if fecha_registro_texto is None else 2
     try:
-        corrida.verificar_conteo(len(cambios_a_aplicar) * 3)
+        corrida.verificar_conteo(len(cambios_a_aplicar) * celdas_por_producto)
         corrida.escribir(wb)
     except registro.RegistroError as e:
         sys.exit(f"\n{e}")
@@ -567,7 +532,8 @@ def procesar(args, interactivo=False):
     print("Archivo guardado correctamente.")
 
 
-def construir_detalle(modo, marcas_filtro, fecha_desde, fecha_hasta, precio_actualizado):
+def construir_detalle(modo, marcas_filtro, fecha_desde, fecha_hasta, precio_actualizado,
+                      fecha_registro_texto=None):
     """Contexto de la corrida para la columna Detalle del registro."""
     partes = [f"Modo: {modo}"]
     partes.append(
@@ -581,21 +547,30 @@ def construir_detalle(modo, marcas_filtro, fecha_desde, fecha_hasta, precio_actu
     else:
         partes.append("Rango: (no aplica)")
     partes.append(f"Nuevo DolarReferencia: {precio_actualizado}")
+    partes.append(
+        f"FechaActualizacion: {fecha_registro_texto}" if fecha_registro_texto
+        else "FechaActualizacion: sin cambios"
+    )
     return " | ".join(partes)
 
 
-def imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_desde, fecha_hasta):
+def imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_desde, fecha_hasta,
+                     fecha_registro_texto=None):
     print("=" * 70)
     print(f"MODO: {modo}")
     if marcas_filtro:
         print(f"Marca(s): {', '.join(marcas_filtro)}")
     if fecha_desde:
         print(f"Rango de fechas: {fecha_desde.strftime('%d/%m/%Y')} a {fecha_hasta.strftime('%d/%m/%Y')}")
-    print(f"PRECIO ACTUALIZADO (nuevo DolarReferencia): {precio_actualizado}")
+    print(f"NUEVO DolarReferencia: {precio_actualizado}")
+    print("PrecioConIVA: NO se recalcula (queda como está)")
+    if fecha_registro_texto:
+        print(f"FECHA A REGISTRAR en FechaActualizacion: {fecha_registro_texto}")
+    else:
+        print("FechaActualizacion: SIN CAMBIOS (no se modifica)")
     print("=" * 70)
 
     total_candidatas = 0
-    total_omitidas_dolar = 0
     total_omitidas_fecha = 0
     total_fuera_rango = 0
 
@@ -605,34 +580,31 @@ def imprimir_reporte(modo, reporte, precio_actualizado, marcas_filtro, fecha_des
             continue
 
         print(f"\nHoja '{item['hoja']}':")
-        print(f"  Candidatas a modificar: {item['candidatas']}")
-        print(f"  Omitidas por DolarReferencia vacía/cero: {item['omitidas_dolar']}")
+        print(f"  Filas a modificar: {item['candidatas']}")
         if modo in ("fecha", "marca_fecha"):
             print(f"  Omitidas por FechaActualizacion vacía/ilegible: {item['omitidas_fecha_invalida']}")
         if modo == "marca_fecha":
             print(f"  De la(s) marca(s), fuera del rango de fechas: {item['fuera_de_rango']}")
 
         total_candidatas += item["candidatas"]
-        total_omitidas_dolar += item["omitidas_dolar"]
         total_omitidas_fecha += item["omitidas_fecha_invalida"]
         total_fuera_rango += item["fuera_de_rango"]
 
         if item["ejemplo"]:
             e = item["ejemplo"]
-            print("  Ejemplo de cálculo:")
-            print(f"    PrecioConIVA anterior: {e['precio_anterior']}")
-            print(f"    DolarReferencia actual (divisor): {e['dolar_anterior']}")
-            print(f"    Multiplicador (PRECIO ACTUALIZADO): {precio_actualizado}")
-            print(f"    -> PrecioConIVA nuevo: {e['precio_nuevo']}")
+            print("  Ejemplo:")
+            print(f"    DolarReferencia anterior: {e['dolar_anterior']}")
             print(f"    -> DolarReferencia nuevo: {e['dolar_nuevo']}")
             if modo in ("fecha", "marca_fecha"):
                 print(f"    FechaActualizacion anterior: {e['fecha_anterior']}")
-            print(f"    -> FechaActualizacion nueva: {e['fecha_nueva']}")
+            if e["fecha_nueva"] is not None:
+                print(f"    -> FechaActualizacion nueva: {e['fecha_nueva']}")
+            else:
+                print("    -> FechaActualizacion: sin cambios")
 
     print("\n" + "-" * 70)
     print("TOTALES")
-    print(f"  Filas que se van a modificar: {total_candidatas - total_omitidas_dolar - total_omitidas_fecha}")
-    print(f"  Omitidas por DolarReferencia vacía/cero: {total_omitidas_dolar}")
+    print(f"  Filas que se van a modificar: {total_candidatas}")
     if modo in ("fecha", "marca_fecha"):
         print(f"  Omitidas por FechaActualizacion vacía/ilegible: {total_omitidas_fecha}")
     if modo == "marca_fecha":
@@ -650,11 +622,10 @@ def pedir_fecha(mensaje):
 
 def pedir_precio(mensaje):
     while True:
-        valor = input(mensaje).strip().replace(",", ".")
-        try:
-            return float(valor)
-        except ValueError:
-            print("  Ingresá un número válido (ej: 1350 o 1350.50).")
+        valor, error = validar_dolar(input(mensaje))
+        if error is None:
+            return valor
+        print(f"  {error}")
 
 
 class _ArgsGuiados:
@@ -699,7 +670,27 @@ def modo_guiado():
         fecha_hasta = pedir_fecha("Fecha hasta (dd/mm/aaaa): ")
 
     print()
-    precio_actualizado = pedir_precio("Precio actualizado (nuevo valor de dólar): ")
+    precio_actualizado = pedir_precio("Nuevo valor de dólar (DolarReferencia): ")
+
+    print()
+    hoy_texto = datetime.date.today().strftime("%d/%m/%Y")
+    fecha_registro = None
+    no_tocar_fecha = False
+    while True:
+        valor = input(
+            f"Fecha a registrar en FechaActualizacion (Enter = hoy {hoy_texto}, "
+            f"'-' = no modificar): "
+        ).strip()
+        if not valor:
+            fecha_registro = hoy_texto
+            break
+        if valor == "-":
+            no_tocar_fecha = True
+            break
+        if parse_fecha(valor) is not None:
+            fecha_registro = valor
+            break
+        print("  Formato inválido. Usá dd/mm/aaaa (ej: 04/06/2026), Enter o '-'.")
 
     args = _ArgsGuiados()
     args.archivo = str(ARCHIVO_PATH)
@@ -708,13 +699,15 @@ def modo_guiado():
     args.fecha_desde = fecha_desde
     args.fecha_hasta = fecha_hasta
     args.precio_actualizado = precio_actualizado
+    args.fecha_registro = fecha_registro
+    args.no_tocar_fecha = no_tocar_fecha
     args.confirmar = False
 
     procesar(args, interactivo=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tipo 2 - Asignar valor dólar")
+    parser = argparse.ArgumentParser(description="Tipo 2 - Asignar valor dólar (sin recalcular precios)")
     parser.add_argument(
         "--archivo",
         default=None,
@@ -728,8 +721,13 @@ def main():
     parser.add_argument("--marca", help="Marca o marcas separadas por coma (requerido en modo marca/marca_fecha)")
     parser.add_argument("--fecha-desde", help="dd/mm/aaaa (requerido en modo fecha/marca_fecha)")
     parser.add_argument("--fecha-hasta", help="dd/mm/aaaa (requerido en modo fecha/marca_fecha)")
-    parser.add_argument("--precio-actualizado", type=float,
-                         help="Nuevo valor de dólar (multiplicador)")
+    parser.add_argument("--precio-actualizado",
+                         help="Nuevo valor de DolarReferencia (no recalcula precios)")
+    grupo_fecha = parser.add_mutually_exclusive_group()
+    grupo_fecha.add_argument("--fecha-registro",
+                             help="dd/mm/aaaa a escribir en FechaActualizacion (si se omite: hoy)")
+    grupo_fecha.add_argument("--no-tocar-fecha", action="store_true",
+                             help="No modifica FechaActualizacion (solo precio y dólar)")
     parser.add_argument("--confirmar", action="store_true",
                          help="Aplica los cambios de verdad. Sin este flag, solo muestra el dry-run "
                               "(salvo en el menú guiado, que pregunta al final).")
@@ -745,6 +743,9 @@ def main():
 
     if args.precio_actualizado is None:
         sys.exit("ERROR: falta --precio-actualizado")
+    args.precio_actualizado, error = validar_dolar(args.precio_actualizado)
+    if error is not None:
+        sys.exit(f"ERROR: --precio-actualizado inválido. {error} No se abrió ni modificó el archivo.")
     if not Path(args.archivo).exists():
         sys.exit(f"ERROR: no se encontró el archivo '{args.archivo}'")
 

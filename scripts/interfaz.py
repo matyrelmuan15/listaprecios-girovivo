@@ -63,6 +63,7 @@ CONFIG_PATH = SCRIPT_DIR / "config_interfaz.json"
 
 sys.path.insert(0, str(SCRIPT_DIR))
 from actualizar_precios import listar_proveedores  # noqa: E402
+from dolar import parse_dolar, validar_dolar  # noqa: E402
 from asignar_dolar import ARCHIVO_PATH as ARCHIVO_DOLAR, listar_marcas  # noqa: E402
 from ia_revision import MARCADOR_ITEMS_JSON_FIN, MARCADOR_ITEMS_JSON_INICIO  # noqa: E402
 
@@ -221,6 +222,10 @@ class InterfazGiroVivo:
             "TRadiobutton", background=COLOR_FONDO, foreground=COLOR_TEXTO, font=FUENTE_BASE
         )
         estilo.map("TRadiobutton", background=[("active", COLOR_FONDO)])
+        estilo.configure(
+            "TCheckbutton", background=COLOR_FONDO, foreground=COLOR_TEXTO, font=FUENTE_BASE
+        )
+        estilo.map("TCheckbutton", background=[("active", COLOR_FONDO)])
 
     # ------------------------------------------------------------------
     # Navegación entre pantallas
@@ -265,7 +270,7 @@ class InterfazGiroVivo:
             fila=0,
             columna=1,
             titulo="Asignar dólar",
-            descripcion="Cambia el valor del dólar de referencia para una o varias marcas.",
+            descripcion="Cambia solo el dólar de referencia (y la fecha). No recalcula precios.",
             accion=self.mostrar_asignar_dolar,
         )
         self._tarjeta_opcion(
@@ -283,6 +288,14 @@ class InterfazGiroVivo:
             titulo="Exportar datos",
             descripcion="Genera el archivo .xls con código y precio de cada producto, listo para subir al sistema.",
             accion=self.mostrar_exportar_datos,
+        )
+        self._tarjeta_opcion(
+            fila_tarjetas,
+            fila=2,
+            columna=0,
+            titulo="Actualizar precio por dólar",
+            descripcion="Recalcula el precio con IVA según el nuevo dólar y actualiza el dólar de referencia.",
+            accion=self.mostrar_actualizar_precio_dolar,
         )
 
         fila_enlaces = ttk.Frame(marco)
@@ -439,6 +452,26 @@ class InterfazGiroVivo:
                 foreground=COLOR_ERROR,
             ).pack(anchor="w", pady=(0, 8))
 
+        # Dólar opcional. No se guarda en la configuración: cambia seguido y
+        # arrancar vacío evita asignar por error un valor viejo.
+        fila_dolar = ttk.Frame(marco)
+        fila_dolar.pack(fill="x", pady=(0, 12))
+        ttk.Label(fila_dolar, text="Valor dólar (opcional):").pack(side="left", padx=(0, 8))
+        self.var_dolar_ap = tk.StringVar()
+        ttk.Entry(fila_dolar, textvariable=self.var_dolar_ap, width=14).pack(side="left")
+        ttk.Label(
+            fila_dolar,
+            text=("Si lo completás (ej. 1515 o 1515,50), se asigna a DolarReferencia "
+                  "de los productos actualizados. Dejalo vacío para no tocar el dólar."),
+            style="Subtitulo.TLabel", wraplength=420, justify="left",
+        ).pack(side="left", padx=(10, 0))
+
+        # Firma (proveedor + dólar) del último dry-run que terminó bien.
+        # "Confirmar y aplicar" solo se habilita si la firma actual coincide.
+        self.ap_dryrun_firma = None
+        self.var_proveedor.trace_add("write", self._ap_al_cambiar_parametro)
+        self.var_dolar_ap.trace_add("write", self._ap_al_cambiar_parametro)
+
         fila_botones = ttk.Frame(marco)
         fila_botones.pack(fill="x", pady=(0, 10))
         self.btn_ap_preview = ttk.Button(
@@ -457,36 +490,87 @@ class InterfazGiroVivo:
 
         return marco
 
+    def _ap_al_cambiar_parametro(self, *_):
+        """Cualquier cambio de proveedor o dólar invalida el dry-run previo."""
+        self.ap_dryrun_firma = None
+        if not self.proceso_en_curso:
+            self.btn_ap_confirmar.configure(state="disabled")
+
+    def _ap_firma_actual(self):
+        return (self.var_proveedor.get().strip(), self.var_dolar_ap.get().strip())
+
+    def _ap_dolar_validado(self):
+        """Devuelve (ok, dolar). dolar es None si el campo está vacío, o el
+        valor normalizado con punto decimal. Si es inválido muestra el error."""
+        texto = self.var_dolar_ap.get().strip()
+        if not texto:
+            return True, None
+        try:
+            return True, str(parse_dolar(texto))
+        except ValueError as e:
+            mensaje = str(e)
+            messagebox.showerror("Valor de dólar inválido", mensaje[:1].upper() + mensaje[1:])
+            return False, None
+
+    def _ap_armar_comando(self, proveedor, dolar, execute):
+        cmd = [PYTHON, str(SCRIPT_DIR / "actualizar_precios.py"), proveedor]
+        if dolar is not None:
+            cmd += ["--dolar", dolar]
+        if execute:
+            cmd += ["--execute"]
+        return cmd
+
     def _ap_correr_preview(self):
         proveedor = self.var_proveedor.get().strip()
         if not proveedor:
             messagebox.showerror("Falta el proveedor", "Elegí un proveedor antes de continuar.")
             return
+        ok, dolar = self._ap_dolar_validado()
+        if not ok:
+            return
         self.config_interfaz["proveedor"] = proveedor
         guardar_config(self.config_interfaz)
         self.btn_ap_confirmar.configure(state="disabled")
-        cmd = [PYTHON, str(SCRIPT_DIR / "actualizar_precios.py"), proveedor]
+        firma = self._ap_firma_actual()
+        self.ap_dryrun_firma = None
+        cmd = self._ap_armar_comando(proveedor, dolar, execute=False)
         self._ejecutar_comando_async(
             cmd, self.texto_ap, [self.btn_ap_preview, self.btn_ap_confirmar],
             tabla=self.tabla_ap,
-            on_finish=lambda codigo: self.btn_ap_confirmar.configure(
-                state="normal" if codigo == 0 else "disabled"
-            ),
+            on_finish=lambda codigo: self._ap_al_terminar_preview(codigo, firma),
         )
+
+    def _ap_al_terminar_preview(self, codigo, firma):
+        # _finalizar_proceso() rehabilita los botones a ciegas; si el dry-run
+        # falló o se cambió el proveedor/dólar mientras corría, no vale.
+        valido = codigo == 0 and firma == self._ap_firma_actual()
+        self.ap_dryrun_firma = firma if valido else None
+        self.btn_ap_confirmar.configure(state="normal" if valido else "disabled")
 
     def _ap_correr_confirmar(self):
         proveedor = self.var_proveedor.get().strip()
         if not proveedor:
             return
+        if self.ap_dryrun_firma != self._ap_firma_actual():
+            messagebox.showerror(
+                "Falta la vista previa",
+                "Corré primero la vista previa con este mismo proveedor y valor de dólar.",
+            )
+            self.btn_ap_confirmar.configure(state="disabled")
+            return
+        ok, dolar = self._ap_dolar_validado()
+        if not ok:
+            return
+        texto_dolar = f" y asignar dólar {dolar} a DolarReferencia" if dolar is not None else ""
         if not messagebox.askyesno(
             "Confirmar cambios reales",
-            f"Esto va a modificar el archivo real para el proveedor '{proveedor}' "
-            "(con backup previo). ¿Confirmás?",
+            f"Esto va a modificar el archivo real para el proveedor '{proveedor}'"
+            f"{texto_dolar} (con backup previo). ¿Confirmás?",
         ):
             return
         self.config_interfaz["proveedor"] = proveedor
         guardar_config(self.config_interfaz)
-        cmd = [PYTHON, str(SCRIPT_DIR / "actualizar_precios.py"), proveedor, "--execute"]
+        cmd = self._ap_armar_comando(proveedor, dolar, execute=True)
         self._ejecutar_comando_async(
             cmd, self.texto_ap, [self.btn_ap_preview, self.btn_ap_confirmar],
             tabla=self.tabla_ap,
@@ -501,14 +585,41 @@ class InterfazGiroVivo:
     # Pantalla: asignar dólar
     # ------------------------------------------------------------------
     def mostrar_asignar_dolar(self):
-        self._cambiar_pantalla(self._construir_pantalla_asignar_dolar)
+        self._cambiar_pantalla(
+            lambda padre: self._construir_pantalla_asignar_dolar(padre, recalcular=False)
+        )
 
-    def _construir_pantalla_asignar_dolar(self, padre):
+    def mostrar_actualizar_precio_dolar(self):
+        self._cambiar_pantalla(
+            lambda padre: self._construir_pantalla_asignar_dolar(padre, recalcular=True)
+        )
+
+    def _construir_pantalla_asignar_dolar(self, padre, recalcular=False):
+        """Pantalla compartida por 'Asignar dólar' (Tipo 2, no recalcula
+        precios) y 'Actualizar precio por dólar' (Tipo 4, recalcula
+        PrecioConIVA). Solo cambian el script, el título y la configuración
+        guardada; los campos son los mismos."""
         marco = ttk.Frame(padre, padding=20)
 
-        self._encabezado_pantalla(marco, "Asignar dólar")
+        if recalcular:
+            self.ad_script = "actualizar_precio_dolar.py"
+            self.ad_config_clave = "actualizar_precio_dolar"
+            titulo = "Actualizar precio por dólar"
+            aclaracion = ("Recalcula PrecioConIVA: precio actual ÷ DolarReferencia actual × "
+                          "nuevo dólar, y escribe el nuevo dólar en DolarReferencia.")
+        else:
+            self.ad_script = "asignar_dolar.py"
+            self.ad_config_clave = "asignar_dolar"
+            titulo = "Asignar dólar"
+            aclaracion = ("Solo escribe el nuevo valor en DolarReferencia (y la fecha). "
+                          "PrecioConIVA no se modifica.")
 
-        config_ad = self.config_interfaz.get("asignar_dolar", {})
+        self._encabezado_pantalla(marco, titulo)
+        ttk.Label(marco, text=aclaracion, style="Subtitulo.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
+
+        config_ad = self.config_interfaz.get(self.ad_config_clave, {})
         modo_guardado = config_ad.get("modo")
         if modo_guardado not in ("marca", "fecha", "marca_fecha"):
             modo_guardado = "marca"
@@ -551,9 +662,27 @@ class InterfazGiroVivo:
         self.var_precio = tk.StringVar(value=config_ad.get("precio_actualizado", ""))
         ttk.Entry(marco_precio, textvariable=self.var_precio, width=14).pack(side="left")
 
-        # Fila 1: marcas
+        # Fila 1: fecha a registrar en FechaActualizacion (visible en los tres
+        # modos). Arranca siempre en HOY; no se guarda en la configuración.
+        hoy_reg = datetime.date.today()
+        marco_fecha_reg = ttk.Frame(self.marco_params)
+        marco_fecha_reg.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(marco_fecha_reg, text="Fecha a registrar:").pack(side="left", padx=(0, 8))
+        self.var_reg_dia = tk.StringVar(value=f"{hoy_reg.day:02d}")
+        self.var_reg_mes = tk.StringVar(value=f"{hoy_reg.month:02d}")
+        self.var_reg_anio = tk.StringVar(value=str(hoy_reg.year))
+        self.combos_fecha_reg = self._ad_combos_fecha(
+            marco_fecha_reg, self.var_reg_dia, self.var_reg_mes, self.var_reg_anio
+        )
+        self.var_no_tocar_fecha = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            marco_fecha_reg, text="No modificar la fecha de actualización",
+            variable=self.var_no_tocar_fecha, command=self._ad_al_cambiar_no_tocar_fecha,
+        ).pack(side="left", padx=(24, 0))
+
+        # Fila 2: marcas
         self.marco_marcas = ttk.Frame(self.marco_params)
-        self.marco_marcas.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self.marco_marcas.grid(row=2, column=0, sticky="ew", pady=(0, 10))
 
         fila_marcas_header = ttk.Frame(self.marco_marcas)
         fila_marcas_header.pack(fill="x", pady=(0, 4))
@@ -584,17 +713,17 @@ class InterfazGiroVivo:
         scroll_marcas.pack(side="right", fill="y")
         self.lista_marcas.bind("<<ListboxSelect>>", self._ad_al_cambiar_parametro)
 
-        # Fila 2: rango de fechas (dos tercias de Combobox día/mes/año)
+        # Fila 3: rango de fechas (dos tercias de Combobox día/mes/año)
         # Default: desde el 1 del mes de ayer, hasta AYER. No hasta hoy:
-        # asignar_dolar.py sella FechaActualizacion con la fecha de hoy, así
-        # que un rango que incluya hoy vuelve a capturar en la corrida
-        # siguiente las mismas filas que acaba de actualizar.
+        # por defecto el script sella FechaActualizacion con la fecha
+        # de hoy, así que un rango que incluya hoy vuelve a capturar en la
+        # corrida siguiente las mismas filas que acaba de actualizar.
         hoy = datetime.date.today()
         ayer = hoy - datetime.timedelta(days=1)
         desde_default = ayer.replace(day=1)
 
         self.marco_fechas = ttk.Frame(self.marco_params)
-        self.marco_fechas.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        self.marco_fechas.grid(row=3, column=0, sticky="ew", pady=(0, 10))
 
         self.var_desde_dia = tk.StringVar(
             value=config_ad.get("desde_dia") or f"{desde_default.day:02d}")
@@ -655,6 +784,7 @@ class InterfazGiroVivo:
             self.var_precio,
             self.var_desde_dia, self.var_desde_mes, self.var_desde_anio,
             self.var_hasta_dia, self.var_hasta_mes, self.var_hasta_anio,
+            self.var_reg_dia, self.var_reg_mes, self.var_reg_anio,
         ):
             var.trace_add("write", self._ad_al_cambiar_parametro)
 
@@ -736,8 +866,16 @@ class InterfazGiroVivo:
     def _ad_marcas_seleccionadas(self):
         return [self.lista_marcas.get(i) for i in self.lista_marcas.curselection()]
 
+    def _ad_al_cambiar_no_tocar_fecha(self):
+        """Con la casilla tildada, los combos de 'Fecha a registrar' quedan
+        deshabilitados: el script no va a escribir FechaActualizacion."""
+        estado = "disabled" if self.var_no_tocar_fecha.get() else "readonly"
+        for combo in self.combos_fecha_reg:
+            combo.configure(state=estado)
+        self._ad_al_cambiar_parametro()
+
     def _ad_fecha_texto(self, cual):
-        """'desde' o 'hasta' -> 'dd/mm/aaaa', tal como lo espera el script."""
+        """'desde', 'hasta' o 'reg' -> 'dd/mm/aaaa', tal como lo espera el script."""
         return "{}/{}/{}".format(
             getattr(self, f"var_{cual}_dia").get(),
             getattr(self, f"var_{cual}_mes").get(),
@@ -782,21 +920,16 @@ class InterfazGiroVivo:
             (self._ad_fecha_texto("desde"), self._ad_fecha_texto("hasta"))
             if modo in ("fecha", "marca_fecha") else ()
         )
-        return (modo, marcas, fechas, self.var_precio.get().strip().replace(",", "."))
+        fecha_reg = None if self.var_no_tocar_fecha.get() else self._ad_fecha_texto("reg")
+        return (modo, marcas, fechas, self.var_precio.get().strip().replace(",", "."), fecha_reg)
 
     def _ad_validar(self):
         """Devuelve (ok, mensaje). El mensaje va al rótulo rojo de la pantalla."""
         modo = self.var_modo.get()
 
-        precio_texto = self.var_precio.get().strip().replace(",", ".")
-        if not precio_texto:
-            return False, "Ingresá el nuevo valor de dólar."
-        try:
-            precio = float(precio_texto)
-        except ValueError:
-            return False, "El valor de dólar tiene que ser un número (por ejemplo 1515 o 1515.50)."
-        if precio <= 0:
-            return False, "El valor de dólar tiene que ser mayor a cero."
+        _, error = validar_dolar(self.var_precio.get())
+        if error is not None:
+            return False, error
 
         if modo in ("marca", "marca_fecha") and not self._ad_marcas_seleccionadas():
             return False, "Elegí al menos una marca de la lista."
@@ -810,6 +943,9 @@ class InterfazGiroVivo:
                 return False, "La 'fecha hasta' no existe (revisá el día para ese mes y año)."
             if desde > hasta:
                 return False, "La 'fecha desde' tiene que ser anterior o igual a la 'fecha hasta'."
+
+        if not self.var_no_tocar_fecha.get() and self._ad_fecha_valida("reg") is None:
+            return False, "La 'fecha a registrar' no existe (revisá el día para ese mes y año)."
 
         return True, ""
 
@@ -829,6 +965,10 @@ class InterfazGiroVivo:
             else:
                 detalle = ", ".join(marcas[:8]) + f" (+{len(marcas) - 8} más)"
             partes.append(f"Marcas: {detalle}")
+        if self.var_no_tocar_fecha.get():
+            partes.append("Fecha de actualización: sin cambios")
+        else:
+            partes.append(f"Fecha a registrar: {self._ad_fecha_texto('reg')}")
         self.lbl_ad_resumen.configure(text=" — ".join(partes))
 
     def _ad_actualizar_estado_botones(self):
@@ -852,7 +992,7 @@ class InterfazGiroVivo:
 
         modo = self.var_modo.get()
         precio_texto = self.var_precio.get().strip().replace(",", ".")
-        cmd = [PYTHON, str(SCRIPT_DIR / "asignar_dolar.py"), "--modo", modo]
+        cmd = [PYTHON, str(SCRIPT_DIR / self.ad_script), "--modo", modo]
 
         marcas = []
         if modo in ("marca", "marca_fecha"):
@@ -867,10 +1007,15 @@ class InterfazGiroVivo:
 
         cmd += ["--precio-actualizado", precio_texto]
 
+        if self.var_no_tocar_fecha.get():
+            cmd += ["--no-tocar-fecha"]
+        else:
+            cmd += ["--fecha-registro", self._ad_fecha_texto("reg")]
+
         if confirmar:
             cmd += ["--confirmar"]
 
-        self.config_interfaz["asignar_dolar"] = {
+        self.config_interfaz[self.ad_config_clave] = {
             "modo": modo,
             "marcas": marcas,
             "precio_actualizado": precio_texto,

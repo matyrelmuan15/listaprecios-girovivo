@@ -17,13 +17,23 @@ ni flags.
 
 MODO POR LÍNEA DE COMANDOS (para automatizar o repetir una corrida exacta)
 ----------------------------------------------------------------------------
-    python actualizar_precios.py <proveedor> [--execute]
+    python actualizar_precios.py <proveedor> [--dolar VALOR] [--execute]
 
 Por defecto corre en modo DRY-RUN (no escribe nada, solo muestra el resumen
 de lo que haría). Para ejecutar los cambios reales, agregar --execute.
 
+--dolar es opcional: si se indica (ej. 1350, 1350,50 o 1350.50), además de
+PrecioConIVA y FechaActualizacion se escribe ese valor en DolarReferencia de
+las mismas filas actualizadas por match de código. Las hojas sin columna
+DolarReferencia se actualizan igual (precio y fecha) y se informan con un
+AVISO. Sin --dolar, DolarReferencia no se toca. El valor sigue la regla
+única de dolar.py (compartida con los demás scripts): la coma se toma como punto decimal, el punto es
+siempre decimal (no hay separador de miles: 1.350 es 1.35) y se escribe tal
+cual, sin redondear.
+
 Ejemplo:
     python actualizar_precios.py venzo
+    python actualizar_precios.py venzo --dolar 1350,50
     python actualizar_precios.py venzo --execute
 
 Reglas generales aplicadas: ver CLAUDE.md en la raíz del proyecto.
@@ -38,7 +48,10 @@ from pathlib import Path
 
 import openpyxl
 
+import formulas
 import registro
+from asignar_dolar import COL_DOLAR
+from dolar import parse_dolar
 from ia_revision import (
     formatear_items_marcados,
     imprimir_items_marcados_json,
@@ -57,10 +70,6 @@ PROVEEDORES_DIR = PROJECT_ROOT / "proveedores"
 HOJA_EXCLUIDA = "Marcas Actualización Dinámica"
 HOJA_ENTRADA = "Hoja1"
 HOJA_REGISTRO = registro.HOJA_REGISTRO
-
-# Formato argentino válido: dígitos, agrupados opcionalmente de a 3 con punto
-# de miles, y coma decimal opcional (ej: "2.607,75", "607,75", "2.607").
-ARG_PRICE_PATTERN = re.compile(r"^\d{1,3}(\.\d{3})*(,\d+)?$")
 
 # El formato de RegistroCambios es único y compartido: vive en registro.py.
 # Este script no define encabezados propios.
@@ -190,27 +199,70 @@ def parse_notas_params(notas_path: Path) -> dict:
     return params
 
 
-def parse_precio(value) -> float:
-    """Convierte el valor de precio de Hoja1 a float, aceptando tanto
-    números planos (1234.56) como texto en formato argentino
-    (punto de miles, coma decimal: '2.607,75').
+def _validar_grupos_miles(partes, original):
+    """Valida que los grupos separados por el separador de miles sean
+    correctos: el primero de 1 a 3 dígitos y los siguientes de 3 exactos."""
+    if not (1 <= len(partes[0]) <= 3) or any(len(g) != 3 for g in partes[1:]):
+        raise ValueError(f"formato de precio no reconocido: {original!r}")
 
-    Si el valor no es un número plano y tampoco matchea el patrón de
-    formato argentino válido, no se asume ninguna conversión: se levanta
-    ValueError para que el llamador lo trate como formato no reconocido."""
+
+def parse_precio(value) -> float:
+    """Convierte el precio de Hoja1 a float, sin importar cómo venga escrito.
+
+    Acepta:
+      - Números reales de Excel (int/float): se usan tal cual.
+      - Texto con símbolo de moneda o espacios: '$ 2.607,75', 'ARS 2607,75'.
+      - Formato argentino: '2.607,75', '2607,75', '3.030.000'.
+      - Formato anglosajón: '2,607.75', '2607.75', '3,030,000'.
+
+    Cómo decide cuál es el separador decimal:
+      - Si hay punto y coma, el que aparece último es el decimal.
+      - Si un mismo separador aparece varias veces (1.234.567), es de miles.
+      - Si aparece una sola vez: con exactamente 3 dígitos después se toma
+        como miles (los precios no llevan 3 decimales); si no, es decimal.
+
+    Si después de limpiar queda algo que no es un número, levanta ValueError
+    para que la fila se informe como "formato no reconocido" y no se toque."""
+    if isinstance(value, bool):
+        raise ValueError(f"formato de precio no reconocido: {value!r}")
     if isinstance(value, (int, float)):
         return float(value)
-    s = str(value).strip()
+
+    original = value
+    s = str(value)
+    # Quitar símbolos de moneda y espacios (incluidos los no separables).
+    s = re.sub(r"(?i)u\$s|us\$|ars|usd|\$", "", s)
+    s = re.sub(r"[\s\u00a0\u202f']", "", s)
     if not s:
-        raise ValueError(f"precio vacío: {value!r}")
-    try:
-        return float(s)
-    except ValueError:
-        pass
-    if not ARG_PRICE_PATTERN.match(s):
-        raise ValueError(f"formato de precio no reconocido: {value!r}")
-    s_arg = s.replace(".", "").replace(",", ".")
-    return float(s_arg)
+        raise ValueError(f"precio vacío: {original!r}")
+    if not re.fullmatch(r"\d[\d.,]*\d|\d", s):
+        raise ValueError(f"formato de precio no reconocido: {original!r}")
+
+    tiene_punto = "." in s
+    tiene_coma = "," in s
+
+    if tiene_punto and tiene_coma:
+        decimal = "." if s.rfind(".") > s.rfind(",") else ","
+        miles = "," if decimal == "." else "."
+        entero, _, decimales = s.rpartition(decimal)
+        if decimal in entero:
+            raise ValueError(f"formato de precio no reconocido: {original!r}")
+        partes = entero.split(miles)
+        _validar_grupos_miles(partes, original)
+        return float("".join(partes) + "." + decimales)
+
+    if tiene_punto or tiene_coma:
+        sep = "." if tiene_punto else ","
+        partes = s.split(sep)
+        if len(partes) > 2:
+            _validar_grupos_miles(partes, original)
+            return float("".join(partes))
+        entero, decimales = partes
+        if len(decimales) == 3 and entero != "0":
+            return float(entero + decimales)
+        return float(entero + "." + decimales)
+
+    return float(s)
 
 
 def apply_formula(precio: float, params: dict) -> float:
@@ -245,7 +297,16 @@ def backup_archivo():
 # ---------------------------------------------------------------------------
 # Lógica principal
 # ---------------------------------------------------------------------------
-def procesar(proveedor: str, execute: bool):
+def procesar(proveedor: str, execute: bool, dolar=None):
+    # El dólar opcional se valida antes de abrir el libro: si es inválido se
+    # aborta sin tocar nada.
+    if dolar is not None:
+        try:
+            dolar = parse_dolar(dolar)
+        except ValueError as e:
+            print(f"ERROR: {e} No se abrió ni modificó el archivo.")
+            sys.exit(1)
+
     notas_path = PROVEEDORES_DIR / proveedor / "NOTAS.md"
     params = parse_notas_params(notas_path)
 
@@ -288,9 +349,9 @@ def procesar(proveedor: str, execute: bool):
             continue
         codigos_hoja1[norm] = celda_precio.value
 
-    # Pre-parseo de precios de Hoja1: separa los que tienen formato
-    # reconocido (número plano o argentino válido) de los que no, para no
-    # convertir a ciegas ni perderlos en silencio.
+    # Pre-parseo de precios de Hoja1: normaliza cualquier formato habitual
+    # (número de Excel, argentino, anglosajón, con $ o espacios) y separa los
+    # que no se pueden interpretar, para no convertir a ciegas ni perderlos.
     precios_parsed = {}  # norm -> float
     avisos_formato = []  # lista de (norm, valor_original)
     for norm, valor_original in codigos_hoja1.items():
@@ -304,11 +365,17 @@ def procesar(proveedor: str, execute: bool):
         f"Proveedor: {proveedor} | Fórmula: "
         + ", ".join(f"{k}={v}" for k, v in params.items())
     )
+    if dolar is not None:
+        detalle_corrida += f" | Dólar: {dolar}"
     corrida = registro.RegistroCorrida(registro.TIPO_PRECIOS, detalle_corrida)
     dry_run_detalle = []  # lista de dicts con detalle original -> parseado (solo dry-run)
     cambios_precio = []  # lista para la revisión automática de anomalías (IA)
-    resumen_por_hoja = {}  # hoja -> {"precios": n, "fechas": n}
+    resumen_por_hoja = {}  # hoja -> {"precios": n, "fechas": n, "dolares": n}
     total_coincidencias = 0
+    total_dolares = 0  # matches en los que se escribió DolarReferencia
+    hojas_sin_dolar = []  # hojas con matches pero sin columna DolarReferencia
+    filas_tocadas = {}  # hoja -> set(filas), para verificar fórmulas
+    precios_nuevos = {}  # (hoja, fila) -> PrecioConIVA que va a quedar
 
     fecha_hoy = datetime.now().strftime("%d/%m/%Y")
 
@@ -322,6 +389,7 @@ def procesar(proveedor: str, execute: bool):
         col_precio_iva = find_header_col(ws, "PrecioConIVA")
         col_fecha = find_header_col(ws, "FechaActualizacion")
         col_nombre = find_header_col(ws, "NombreProducto")
+        col_dolar = find_header_col(ws, COL_DOLAR) if dolar is not None else None
 
         if col_codfac is None or col_precio_iva is None or col_fecha is None:
             # Esta hoja no es una hoja de destino válida para este prompt
@@ -329,6 +397,7 @@ def procesar(proveedor: str, execute: bool):
 
         precios_mod = 0
         fechas_mod = 0
+        dolares_mod = 0
 
         for row in ws.iter_rows(min_row=2):
             celda_codfac = row[col_codfac - 1]
@@ -377,6 +446,16 @@ def procesar(proveedor: str, execute: bool):
                 valor_anterior=valor_anterior_fecha, valor_nuevo=fecha_hoy,
             )
 
+            # DolarReferencia solo si se indicó --dolar y la hoja tiene la
+            # columna: una fila de registro más por esa celda.
+            celda_dolar = row[col_dolar - 1] if col_dolar else None
+            if celda_dolar is not None:
+                corrida.agregar(
+                    hoja=sheet_name, fila=fila_num, nombre_producto=nombre_valor,
+                    marca=marca_valor, columna=COL_DOLAR,
+                    valor_anterior=celda_dolar.value, valor_nuevo=dolar,
+                )
+
             if not execute:
                 dry_run_detalle.append({
                     "Hoja": sheet_name, "Fila": fila_num, "Codigo": match,
@@ -386,14 +465,26 @@ def procesar(proveedor: str, execute: bool):
             if execute:
                 celda_precio_iva.value = precio_nuevo
                 celda_fecha.value = fecha_hoy
+                if celda_dolar is not None:
+                    celda_dolar.value = dolar
+
+            filas_tocadas.setdefault(sheet_name, set()).add(fila_num)
+            precios_nuevos[(sheet_name, fila_num)] = precio_nuevo
 
             precios_mod += 1
             fechas_mod += 1
+            if celda_dolar is not None:
+                dolares_mod += 1
+                total_dolares += 1
             total_coincidencias += 1
             codigos_no_encontrados.discard(match)
 
         if precios_mod > 0:
-            resumen_por_hoja[sheet_name] = {"precios": precios_mod, "fechas": fechas_mod}
+            resumen_por_hoja[sheet_name] = {
+                "precios": precios_mod, "fechas": fechas_mod, "dolares": dolares_mod,
+            }
+            if dolar is not None and col_dolar is None:
+                hojas_sin_dolar.append(sheet_name)
 
     # ---- Columna E de Hoja1: códigos sin match ----
     no_encontrados_ordenados = sorted(codigos_no_encontrados)
@@ -407,9 +498,20 @@ def procesar(proveedor: str, execute: bool):
 
     # ---- RegistroCambios ----
     # Verificación de conteo obligatoria (regla 8): 2 celdas por match
-    # (PrecioConIVA + FechaActualizacion). Se corre antes de escribir, y si
-    # falla se aborta sin guardar.
-    celdas_modificadas = total_coincidencias * 2
+    # (PrecioConIVA + FechaActualizacion), más 1 por cada match en que se
+    # escribió DolarReferencia. Se corre antes de escribir, y si falla se
+    # aborta sin guardar.
+    # Además se verifican las fórmulas de PrecioContado y PrecioSinIVA de las
+    # filas actualizadas: si alguna perdió la fórmula, se repone y se registra
+    # (una fila de registro por celda, igual que el resto).
+    cambios_formulas, _ = formulas.revisar(
+        wb, filas=filas_tocadas, precios_nuevos=precios_nuevos, redondear_coniva=False
+    )
+    formulas.registrar(corrida, cambios_formulas)
+    if execute:
+        formulas.aplicar(wb, cambios_formulas)
+
+    celdas_modificadas = total_coincidencias * 2 + total_dolares + len(cambios_formulas)
     try:
         corrida.verificar_conteo(celdas_modificadas)
         if execute:
@@ -424,15 +526,29 @@ def procesar(proveedor: str, execute: bool):
     modo = "EJECUCIÓN" if execute else "DRY-RUN (sin escribir cambios)"
     print(f"\n=== Proveedor: {proveedor} | Modo: {modo} ===\n")
     print(f"Fórmula aplicada: {params}")
+    if dolar is not None:
+        print(f"Dólar asignado: {dolar}")
     print(f"Total de coincidencias encontradas: {total_coincidencias}")
     print(f"Total de precios modificados: {total_coincidencias}")
     print(f"Total de fechas modificadas: {total_coincidencias}")
+    if dolar is not None:
+        print(f"Total de DolarReferencia modificados: {total_dolares}")
     print("\nDesglose por hoja:")
     if resumen_por_hoja:
         for hoja, datos in resumen_por_hoja.items():
-            print(f"  - {hoja}: {datos['precios']} precios, {datos['fechas']} fechas")
+            linea = f"  - {hoja}: {datos['precios']} precios, {datos['fechas']} fechas"
+            if dolar is not None:
+                linea += f", {datos['dolares']} dólares"
+            print(linea)
     else:
         print("  (sin coincidencias en ninguna hoja)")
+    if hojas_sin_dolar:
+        print(
+            f"\nAVISO: no se pudo asignar el dólar en {len(hojas_sin_dolar)} hoja(s) "
+            f"sin columna '{COL_DOLAR}' (precio y fecha sí se actualizan):"
+        )
+        for hoja in hojas_sin_dolar:
+            print(f"  - {hoja}")
     print(f"\nCódigos de Hoja1 sin encontrar: {len(no_encontrados_ordenados)}")
     if no_encontrados_ordenados:
         print(f"  {no_encontrados_ordenados}")
@@ -442,6 +558,10 @@ def procesar(proveedor: str, execute: bool):
     if avisos_formato_ordenados:
         for norm, valor_original in avisos_formato_ordenados:
             print(f"  - Código '{norm}': valor original {valor_original!r}")
+
+    formulas.imprimir_resumen(
+        cambios_formulas, [], titulo="Fórmulas de contado y sin IVA en las filas actualizadas"
+    )
 
     # ---- Revisión automática de posibles anomalías (estadística + IA) ----
     print("\n--- Revisión automática de posibles anomalías ---")
@@ -542,6 +662,14 @@ def main():
         action="store_true",
         help="Ejecuta los cambios reales (por defecto corre en modo dry-run).",
     )
+    parser.add_argument(
+        "--dolar",
+        default=None,
+        help=(
+            "Opcional. Valor de dólar a escribir en DolarReferencia de las filas "
+            "actualizadas (acepta coma o punto decimal, ej. 1350,50)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.proveedor is None:
@@ -550,7 +678,7 @@ def main():
         return
 
     # Con argumentos explícitos: comportamiento clásico por línea de comandos.
-    procesar(args.proveedor, args.execute)
+    procesar(args.proveedor, args.execute, dolar=args.dolar)
 
 
 if __name__ == "__main__":

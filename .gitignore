@@ -1,2 +1,7 @@
 ﻿backup/*.xlsx
 !backup/.gitkeep
+__pycache__/
+*.pyc
+~$*
+backup/scripts_*/
+exportacion/backups/
