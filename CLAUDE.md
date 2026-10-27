@@ -65,8 +65,21 @@ ListaPreciosGiroVivo/
     ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro)
     ├── migrar_registro.py      (migración de un solo uso de RegistroCambios)
     ├── ia_revision.py          (revisión automática de anomalías)
+    ├── sincronizar_git.py      (sincronización con GitHub, usada por la interfaz)
     └── interfaz.py             (interfaz gráfica de escritorio)
 ```
+
+## Sincronización con GitHub
+La interfaz sincroniza el proyecto con `origin/main` (vía `scripts/sincronizar_git.py`) para trabajar en dos PC sin comandos manuales.
+- **Baja** cambios (`git fetch` + `git pull --ff-only`) al abrir el programa, antes de cada vista previa y antes de cada "Confirmar y aplicar". Si en la confirmación llegaron cambios nuevos, se cancela y se exige una nueva vista previa. Si no hay conexión, se pregunta si continuar.
+- **Sube** cambios (`git add -A` + commit + `git push`) solo después de una ejecución real terminada con código 0, y con el botón "Sincronizar ahora". Mensaje: `Auto: <operación> – <detalle> – dd/mm/aaaa HH:MM – PC <COMPUTERNAME>`. También sube commits pendientes de corridas anteriores sin conexión.
+- **Nunca** `--force`, merge, rebase, stash ni reset automáticos. Si las dos PC tienen cambios distintos, el estado es "conflicto" y se resuelve a mano.
+- Cada comando git: timeout de 60 s, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `CREATE_NO_WINDOW` (sin ventanas de consola ni pedidos de contraseña).
+- `.git/index.lock` se borra solo si tiene más de 2 minutos y no hay ningún `git.exe` corriendo; si no, se aborta.
+- Si git no está instalado o la carpeta no es un repositorio, la sincronización se desactiva y el programa sigue funcionando.
+- La sincronización **no** escribe en `RegistroCambios` (no son cambios de celdas).
+- `scripts/config_interfaz.json` no se versiona: son preferencias de cada PC.
+- Cada PC necesita la credencial de GitHub guardada (Git Credential Manager) y `user.name` / `user.email` configurados.
 
 ## Estilo de comunicación
 Formal y profesional, en español rioplatense (voseo), sin vulgarismos.

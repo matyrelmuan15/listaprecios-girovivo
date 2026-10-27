@@ -29,6 +29,10 @@ Estructura (para seguir afinando en Claude Code)
 - listar_proveedores() y listar_marcas() se importan directamente de los
   scripts existentes (son funciones puras, no ejecutan nada raro al
   importarlas).
+- Sincronización con GitHub (sincronizar_git.py): baja cambios al abrir,
+  antes de cada vista previa y antes de cada confirmación; sube los
+  cambios después de cada ejecución real terminada bien. Corre con el
+  mismo patrón hilo + cola (_sync_async) y nunca impide usar el programa.
 
 Requisitos: Python 3.8+ con Tkinter (viene incluido en la instalación
 estándar de Python para Windows).
@@ -66,6 +70,9 @@ from actualizar_precios import listar_proveedores  # noqa: E402
 from dolar import parse_dolar, validar_dolar  # noqa: E402
 from asignar_dolar import ARCHIVO_PATH as ARCHIVO_DOLAR, listar_marcas  # noqa: E402
 from ia_revision import MARCADOR_ITEMS_JSON_FIN, MARCADOR_ITEMS_JSON_INICIO  # noqa: E402
+from sincronizar_git import (  # noqa: E402
+    ResultadoSync, bajar_cambios, mensaje_commit, subir_cambios,
+)
 
 PATRON_ITEMS_JSON = re.compile(
     re.escape(MARCADOR_ITEMS_JSON_INICIO) + r"(.*)" + re.escape(MARCADOR_ITEMS_JSON_FIN)
@@ -140,7 +147,18 @@ class InterfazGiroVivo:
         self.pantalla_actual = None
         self.proceso_en_curso = False
 
+        # Estado de la sincronización con GitHub. La pantalla de inicio se
+        # destruye en cada navegación, así que el texto de la línea de
+        # estado se guarda acá y se redibuja al volver.
+        self.sync_en_curso = False
+        self.sync_desactivado = False
+        self.estado_sync = ("Sincronizando con GitHub…", COLOR_TEXTO_SECUNDARIO)
+        self.lbl_estado_sync = None
+        self.btn_sync_ahora = None
+        self.botones_tarjetas = []
+
         self.mostrar_inicio()
+        self._sync_async(bajar_cambios, lambda resultado: None)
 
     # ------------------------------------------------------------------
     # Estilos ttk
@@ -249,9 +267,17 @@ class InterfazGiroVivo:
             anchor="w"
         )
         ttk.Label(marco, text="Elegí qué querés hacer", style="Subtitulo.TLabel").pack(
-            anchor="w", pady=(2, 20)
+            anchor="w", pady=(2, 6)
         )
 
+        texto_sync, color_sync = self.estado_sync
+        self.lbl_estado_sync = tk.Label(
+            marco, text=texto_sync, bg=COLOR_FONDO, fg=color_sync, font=FUENTE_SUBTITULO,
+            anchor="w", justify="left", wraplength=820,
+        )
+        self.lbl_estado_sync.pack(anchor="w", fill="x", pady=(0, 14))
+
+        self.botones_tarjetas = []
         fila_tarjetas = ttk.Frame(marco)
         fila_tarjetas.pack(fill="x")
         fila_tarjetas.columnconfigure(0, weight=1)
@@ -309,7 +335,13 @@ class InterfazGiroVivo:
         self._enlace(
             fila_enlaces, "Abrir Excel (Hoja1)", self._abrir_excel_hoja1
         ).pack(side="left", padx=(24, 0))
+        self.btn_sync_ahora = ttk.Button(
+            fila_enlaces, text="Sincronizar ahora", style="Normal.TButton",
+            command=self._sync_manual,
+        )
+        self.btn_sync_ahora.pack(side="right")
 
+        self._refrescar_controles_inicio()
         return marco
 
     def _enlace(self, padre, texto, accion):
@@ -416,9 +448,9 @@ class InterfazGiroVivo:
             font=FUENTE_BASE, wraplength=320, justify="left",
         ).pack(anchor="w", pady=(6, 14))
 
-        ttk.Button(tarjeta, text="Elegir", style="Acento.TButton", command=accion).pack(
-            anchor="w"
-        )
+        boton = ttk.Button(tarjeta, text="Elegir", style="Acento.TButton", command=accion)
+        boton.pack(anchor="w")
+        self.botones_tarjetas.append(boton)
 
     # ------------------------------------------------------------------
     # Pantalla: actualizar precios
@@ -493,8 +525,13 @@ class InterfazGiroVivo:
     def _ap_al_cambiar_parametro(self, *_):
         """Cualquier cambio de proveedor o dólar invalida el dry-run previo."""
         self.ap_dryrun_firma = None
-        if not self.proceso_en_curso:
+        if not (self.proceso_en_curso or self.sync_en_curso):
             self.btn_ap_confirmar.configure(state="disabled")
+
+    def _ap_restaurar_botones(self):
+        self.btn_ap_preview.configure(state="normal")
+        listo = self.ap_dryrun_firma is not None and self.ap_dryrun_firma == self._ap_firma_actual()
+        self.btn_ap_confirmar.configure(state="normal" if listo else "disabled")
 
     def _ap_firma_actual(self):
         return (self.var_proveedor.get().strip(), self.var_dolar_ap.get().strip())
@@ -534,10 +571,13 @@ class InterfazGiroVivo:
         firma = self._ap_firma_actual()
         self.ap_dryrun_firma = None
         cmd = self._ap_armar_comando(proveedor, dolar, execute=False)
-        self._ejecutar_comando_async(
-            cmd, self.texto_ap, [self.btn_ap_preview, self.btn_ap_confirmar],
-            tabla=self.tabla_ap,
-            on_finish=lambda codigo: self._ap_al_terminar_preview(codigo, firma),
+        botones = [self.btn_ap_preview, self.btn_ap_confirmar]
+        self._bajar_antes_de_preview(
+            self.texto_ap, botones,
+            lambda: self._ejecutar_comando_async(
+                cmd, self.texto_ap, botones, tabla=self.tabla_ap, limpiar_salida=False,
+                on_finish=lambda codigo: self._ap_al_terminar_preview(codigo, firma),
+            ),
         )
 
     def _ap_al_terminar_preview(self, codigo, firma):
@@ -561,24 +601,41 @@ class InterfazGiroVivo:
         ok, dolar = self._ap_dolar_validado()
         if not ok:
             return
-        texto_dolar = f" y asignar dólar {dolar} a DolarReferencia" if dolar is not None else ""
-        if not messagebox.askyesno(
-            "Confirmar cambios reales",
-            f"Esto va a modificar el archivo real para el proveedor '{proveedor}'"
-            f"{texto_dolar} (con backup previo). ¿Confirmás?",
-        ):
-            return
-        self.config_interfaz["proveedor"] = proveedor
-        guardar_config(self.config_interfaz)
-        cmd = self._ap_armar_comando(proveedor, dolar, execute=True)
-        self._ejecutar_comando_async(
-            cmd, self.texto_ap, [self.btn_ap_preview, self.btn_ap_confirmar],
-            tabla=self.tabla_ap,
-            on_finish=lambda codigo: messagebox.showinfo(
-                "Listo", "Cambios aplicados correctamente."
-            ) if codigo == 0 else messagebox.showerror(
-                "Hubo un problema", "Revisá el detalle en el cuadro de salida."
-            ),
+        firma = self._ap_firma_actual()
+        botones = [self.btn_ap_preview, self.btn_ap_confirmar]
+
+        def invalidar():
+            self.ap_dryrun_firma = None
+
+        def aplicar():
+            # Si se tocó el proveedor o el dólar mientras se sincronizaba,
+            # la vista previa ya no corresponde.
+            if self._ap_firma_actual() != firma:
+                self.ap_dryrun_firma = None
+                self._ap_restaurar_botones()
+                return
+            texto_dolar = f" y asignar dólar {dolar} a DolarReferencia" if dolar is not None else ""
+            if not messagebox.askyesno(
+                "Confirmar cambios reales",
+                f"Esto va a modificar el archivo real para el proveedor '{proveedor}'"
+                f"{texto_dolar} (con backup previo). ¿Confirmás?",
+            ):
+                self._ap_restaurar_botones()
+                return
+            self.config_interfaz["proveedor"] = proveedor
+            guardar_config(self.config_interfaz)
+            cmd = self._ap_armar_comando(proveedor, dolar, execute=True)
+            detalle = f"proveedor {proveedor}" + (f", dólar {dolar}" if dolar is not None else "")
+            self._ejecutar_comando_async(
+                cmd, self.texto_ap, botones, tabla=self.tabla_ap, limpiar_salida=False,
+                on_finish=lambda codigo: self._al_terminar_ejecucion(
+                    codigo, self.texto_ap, botones, self._ap_restaurar_botones,
+                    "actualizar precios", detalle,
+                ),
+            )
+
+        self._bajar_antes_de_confirmar(
+            self.texto_ap, botones, self._ap_restaurar_botones, invalidar, aplicar
         )
 
     # ------------------------------------------------------------------
@@ -973,7 +1030,7 @@ class InterfazGiroVivo:
 
     def _ad_actualizar_estado_botones(self):
         ok, _ = self._ad_validar()
-        ocupado = self.proceso_en_curso or self.ad_marcas_cargando
+        ocupado = self.proceso_en_curso or self.sync_en_curso or self.ad_marcas_cargando
         self.btn_ad_preview.configure(state="normal" if ok and not ocupado else "disabled")
         listo = (
             ok and not ocupado
@@ -1033,16 +1090,35 @@ class InterfazGiroVivo:
     def _ad_botones_bloqueables(self):
         return [self.btn_ad_preview, self.btn_ad_confirmar, self.btn_ad_actualizar_marcas]
 
+    def _ad_restaurar_botones(self):
+        self.btn_ad_actualizar_marcas.configure(state="normal")
+        self._ad_actualizar_estado_botones()
+
+    def _ad_detalle_commit(self):
+        """Detalle para el mensaje del commit automático: modo, marcas o
+        rango y valor del dólar."""
+        modo = self.var_modo.get()
+        partes = []
+        if modo in ("marca", "marca_fecha"):
+            partes.append("marcas " + self._resumir_lista(self._ad_marcas_seleccionadas()))
+        if modo in ("fecha", "marca_fecha"):
+            partes.append(f"rango {self._ad_fecha_texto('desde')} a {self._ad_fecha_texto('hasta')}")
+        partes.append(f"dólar {self.var_precio.get().strip().replace(',', '.')}")
+        return ", ".join(partes)
+
     def _ad_correr_preview(self):
         cmd = self._ad_armar_comando(confirmar=False)
         if cmd is None:
             return
         firma = self._ad_firma_actual()
         self.ad_dryrun_firma = None
-        self._ejecutar_comando_async(
-            cmd, self.texto_ad, self._ad_botones_bloqueables(),
-            tabla=self.tabla_ad,
-            on_finish=lambda codigo: self._ad_al_terminar_preview(codigo, firma),
+        self._bajar_antes_de_preview(
+            self.texto_ad, self._ad_botones_bloqueables(),
+            lambda: self._ejecutar_comando_async(
+                cmd, self.texto_ad, self._ad_botones_bloqueables(),
+                tabla=self.tabla_ad, limpiar_salida=False,
+                on_finish=lambda codigo: self._ad_al_terminar_preview(codigo, firma),
+            ),
         )
 
     def _ad_al_terminar_preview(self, codigo, firma):
@@ -1063,25 +1139,47 @@ class InterfazGiroVivo:
         cmd = self._ad_armar_comando(confirmar=True)
         if cmd is None:
             return
-        if not messagebox.askyesno(
-            "Confirmar cambios reales",
-            "Esto va a modificar el archivo real (con backup previo). ¿Confirmás?",
-        ):
-            return
-        self._ejecutar_comando_async(
-            cmd, self.texto_ad, self._ad_botones_bloqueables(),
-            tabla=self.tabla_ad,
-            on_finish=self._ad_al_terminar_confirmar,
+        firma = self._ad_firma_actual()
+        detalle = self._ad_detalle_commit()
+        operacion = (
+            "actualizar precio por dólar" if self.ad_script == "actualizar_precio_dolar.py"
+            else "asignar dólar"
         )
 
-    def _ad_al_terminar_confirmar(self, codigo):
+        def invalidar():
+            self.ad_dryrun_firma = None
+
+        def aplicar():
+            if self._ad_firma_actual() != firma:
+                self.ad_dryrun_firma = None
+                self._ad_restaurar_botones()
+                return
+            if not messagebox.askyesno(
+                "Confirmar cambios reales",
+                "Esto va a modificar el archivo real (con backup previo). ¿Confirmás?",
+            ):
+                self._ad_restaurar_botones()
+                return
+            self._ejecutar_comando_async(
+                cmd, self.texto_ad, self._ad_botones_bloqueables(),
+                tabla=self.tabla_ad, limpiar_salida=False,
+                on_finish=lambda codigo: self._ad_al_terminar_confirmar(
+                    codigo, operacion, detalle
+                ),
+            )
+
+        self._bajar_antes_de_confirmar(
+            self.texto_ad, self._ad_botones_bloqueables(), self._ad_restaurar_botones,
+            invalidar, aplicar,
+        )
+
+    def _ad_al_terminar_confirmar(self, codigo, operacion, detalle):
         # Tras aplicar, el dry-run deja de ser válido: las filas ya cambiaron.
         self.ad_dryrun_firma = None
-        self._ad_actualizar_estado_botones()
-        if codigo == 0:
-            messagebox.showinfo("Listo", "Cambios aplicados correctamente.")
-        else:
-            messagebox.showerror("Hubo un problema", "Revisá el detalle en el cuadro de salida.")
+        self._al_terminar_ejecucion(
+            codigo, self.texto_ad, self._ad_botones_bloqueables(), self._ad_restaurar_botones,
+            operacion, detalle,
+        )
 
     # ------------------------------------------------------------------
     # Pantalla: actualizar fecha (Tipo 3)
@@ -1288,7 +1386,7 @@ class InterfazGiroVivo:
 
     def _af_actualizar_estado_botones(self):
         hay_seleccion = bool(self.lista_af_marcas.curselection())
-        ocupado = self.proceso_en_curso or self.af_marcas_cargando
+        ocupado = self.proceso_en_curso or self.sync_en_curso or self.af_marcas_cargando
         self.btn_af_preview.configure(state="normal" if hay_seleccion and not ocupado else "disabled")
         self.btn_af_confirmar.configure(
             state="normal" if hay_seleccion and self.af_dryrun_ok and not ocupado else "disabled"
@@ -1340,15 +1438,24 @@ class InterfazGiroVivo:
         except ValueError:
             return False
 
+    def _af_botones_bloqueables(self):
+        return [self.btn_af_preview, self.btn_af_confirmar, self.btn_af_actualizar_marcas]
+
+    def _af_restaurar_botones(self):
+        self.btn_af_actualizar_marcas.configure(state="normal")
+        self._af_actualizar_estado_botones()
+
     def _af_correr_preview(self):
         cmd = self._af_armar_comando(confirmar=False)
         if cmd is None:
             return
         self.af_dryrun_ok = False
-        self._ejecutar_comando_async(
-            cmd, self.texto_af,
-            [self.btn_af_preview, self.btn_af_confirmar, self.btn_af_actualizar_marcas],
-            on_finish=self._af_al_terminar_preview,
+        self._bajar_antes_de_preview(
+            self.texto_af, self._af_botones_bloqueables(),
+            lambda: self._ejecutar_comando_async(
+                cmd, self.texto_af, self._af_botones_bloqueables(), limpiar_salida=False,
+                on_finish=self._af_al_terminar_preview,
+            ),
         )
 
     def _af_al_terminar_preview(self, codigo):
@@ -1359,24 +1466,44 @@ class InterfazGiroVivo:
         cmd = self._af_armar_comando(confirmar=True)
         if cmd is None:
             return
-        if not messagebox.askyesno(
-            "Confirmar cambios reales",
-            "Esto va a modificar el archivo real (con backup previo). ¿Confirmás?",
-        ):
-            return
-        self._ejecutar_comando_async(
-            cmd, self.texto_af,
-            [self.btn_af_preview, self.btn_af_confirmar, self.btn_af_actualizar_marcas],
-            on_finish=self._af_al_terminar_confirmar,
+        marcas = [self.lista_af_marcas.get(i) for i in self.lista_af_marcas.curselection()]
+        fecha = (
+            "fecha de hoy" if self.var_af_modo.get() == "hoy"
+            else f"fecha {self.var_af_dia.get()}/{self.var_af_mes.get()}/{self.var_af_anio.get()}"
+        )
+        detalle = f"marcas {self._resumir_lista(marcas)}, {fecha}"
+
+        def invalidar():
+            self.af_dryrun_ok = False
+
+        def aplicar():
+            # Si se cambió la selección de marcas mientras se sincronizaba,
+            # la vista previa ya no corresponde.
+            if not self.af_dryrun_ok:
+                self._af_restaurar_botones()
+                return
+            if not messagebox.askyesno(
+                "Confirmar cambios reales",
+                "Esto va a modificar el archivo real (con backup previo). ¿Confirmás?",
+            ):
+                self._af_restaurar_botones()
+                return
+            self._ejecutar_comando_async(
+                cmd, self.texto_af, self._af_botones_bloqueables(), limpiar_salida=False,
+                on_finish=lambda codigo: self._af_al_terminar_confirmar(codigo, detalle),
+            )
+
+        self._bajar_antes_de_confirmar(
+            self.texto_af, self._af_botones_bloqueables(), self._af_restaurar_botones,
+            invalidar, aplicar,
         )
 
-    def _af_al_terminar_confirmar(self, codigo):
+    def _af_al_terminar_confirmar(self, codigo, detalle):
         self.af_dryrun_ok = False
-        self._af_actualizar_estado_botones()
-        if codigo == 0:
-            messagebox.showinfo("Listo", "Cambios aplicados correctamente.")
-        else:
-            messagebox.showerror("Hubo un problema", "Revisá el detalle en el cuadro de salida.")
+        self._al_terminar_ejecucion(
+            codigo, self.texto_af, self._af_botones_bloqueables(), self._af_restaurar_botones,
+            "actualizar fecha", detalle,
+        )
 
     # ------------------------------------------------------------------
     # Pantalla: exportar datos (Tipo 4)
@@ -1426,6 +1553,7 @@ class InterfazGiroVivo:
         ).pack(side="left", padx=(12, 0))
 
         self.texto_ex = self._crear_area_salida(marco)
+        self.ex_dryrun_ok = False
         return marco
 
     def _abrir_carpeta_exportacion(self):
@@ -1441,35 +1569,58 @@ class InterfazGiroVivo:
         except Exception as e:
             messagebox.showerror("No se pudo abrir la carpeta", str(e))
 
+    def _ex_botones(self):
+        return [self.btn_ex_preview, self.btn_ex_confirmar]
+
+    def _ex_restaurar_botones(self):
+        self.btn_ex_preview.configure(state="normal")
+        self.btn_ex_confirmar.configure(state="normal" if self.ex_dryrun_ok else "disabled")
+
     def _ex_correr_preview(self):
+        self.ex_dryrun_ok = False
         self.btn_ex_confirmar.configure(state="disabled")
         cmd = [PYTHON, str(SCRIPT_DIR / "exportar_datos.py")]
-        self._ejecutar_comando_async(
-            cmd, self.texto_ex, [self.btn_ex_preview, self.btn_ex_confirmar],
-            on_finish=lambda codigo: self.btn_ex_confirmar.configure(
-                state="normal" if codigo == 0 else "disabled"
+        self._bajar_antes_de_preview(
+            self.texto_ex, self._ex_botones(),
+            lambda: self._ejecutar_comando_async(
+                cmd, self.texto_ex, self._ex_botones(), limpiar_salida=False,
+                on_finish=self._ex_al_terminar_preview,
             ),
         )
 
+    def _ex_al_terminar_preview(self, codigo):
+        self.ex_dryrun_ok = codigo == 0
+        self._ex_restaurar_botones()
+
     def _ex_correr_confirmar(self):
-        if not messagebox.askyesno(
-            "Confirmar exportación",
-            "Esto va a reemplazar el archivo de exportación anterior "
-            "(se guarda una copia en exportacion/backups). ¿Confirmás?",
-        ):
-            return
-        cmd = [PYTHON, str(SCRIPT_DIR / "exportar_datos.py"), "--execute"]
-        self._ejecutar_comando_async(
-            cmd, self.texto_ex, [self.btn_ex_preview, self.btn_ex_confirmar],
-            on_finish=self._ex_al_terminar_confirmar,
+        def invalidar():
+            self.ex_dryrun_ok = False
+
+        def aplicar():
+            if not messagebox.askyesno(
+                "Confirmar exportación",
+                "Esto va a reemplazar el archivo de exportación anterior "
+                "(se guarda una copia en exportacion/backups). ¿Confirmás?",
+            ):
+                self._ex_restaurar_botones()
+                return
+            cmd = [PYTHON, str(SCRIPT_DIR / "exportar_datos.py"), "--execute"]
+            self._ejecutar_comando_async(
+                cmd, self.texto_ex, self._ex_botones(), limpiar_salida=False,
+                on_finish=self._ex_al_terminar_confirmar,
+            )
+
+        self._bajar_antes_de_confirmar(
+            self.texto_ex, self._ex_botones(), self._ex_restaurar_botones, invalidar, aplicar
         )
 
     def _ex_al_terminar_confirmar(self, codigo):
-        self.btn_ex_confirmar.configure(state="disabled")
-        if codigo == 0:
-            messagebox.showinfo("Listo", "Archivo de exportación generado correctamente.")
-        else:
-            messagebox.showerror("Hubo un problema", "Revisá el detalle en el cuadro de salida.")
+        self.ex_dryrun_ok = False
+        self._al_terminar_ejecucion(
+            codigo, self.texto_ex, self._ex_botones(), self._ex_restaurar_botones,
+            "exportar datos", "archivo .xls",
+            texto_listo="Archivo de exportación generado correctamente.",
+        )
 
     # ------------------------------------------------------------------
     # Utilidades comunes de UI
@@ -1572,11 +1723,258 @@ class InterfazGiroVivo:
         widgets["tabla"].pack(side="left", fill="both", expand=True)
         widgets["scroll"].pack(side="right", fill="y")
 
+    @staticmethod
+    def _existe(widget):
+        """True si el widget sigue vivo (las pantallas se destruyen al
+        navegar, y una sincronización puede terminar después)."""
+        try:
+            return widget is not None and bool(widget.winfo_exists())
+        except tk.TclError:
+            return False
+
+    @staticmethod
+    def _resumir_lista(items, maximo=5):
+        if len(items) <= maximo:
+            return ", ".join(items)
+        return ", ".join(items[:maximo]) + f" (+{len(items) - maximo} más)"
+
+    # ------------------------------------------------------------------
+    # Sincronización con GitHub (sincronizar_git.py)
+    # ------------------------------------------------------------------
+    def _sync_async(self, funcion, on_finish, *args):
+        """Corre bajar_cambios() / subir_cambios() en un hilo aparte, con el
+        mismo patrón que _ejecutar_comando_async(): el hilo solo deja el
+        ResultadoSync en una cola y root.after() es el único que toca widgets."""
+        self.sync_en_curso = True
+        self.estado_sync = ("Sincronizando con GitHub…", COLOR_TEXTO_SECUNDARIO)
+        self._refrescar_controles_inicio()
+        cola = queue.Queue()
+
+        def trabajo_en_hilo():
+            try:
+                cola.put(funcion(*args))
+            except Exception as e:  # sincronizar_git no debería lanzar, pero por las dudas
+                cola.put(ResultadoSync("error", f"Error inesperado al sincronizar: {e}"))
+
+        threading.Thread(target=trabajo_en_hilo, daemon=True).start()
+
+        def sondear():
+            try:
+                resultado = cola.get_nowait()
+            except queue.Empty:
+                self.root.after(80, sondear)
+                return
+            self.sync_en_curso = False
+            if resultado.estado == "desactivado":
+                self.sync_desactivado = True
+            self._actualizar_estado_sync(resultado)
+            on_finish(resultado)
+
+        sondear()
+
+    def _actualizar_estado_sync(self, resultado):
+        hora = datetime.datetime.now().strftime("%H:%M")
+        if resultado.estado in ("ok", "sin_cambios"):
+            texto, color = f"Sincronizado con GitHub ({hora})", COLOR_ACENTO
+            if resultado.trajo_cambios:
+                texto += " — se bajaron cambios nuevos"
+                if any(a.endswith(".py") for a in resultado.archivos):
+                    texto += (". Se actualizaron scripts del programa: cerralo y volvé a "
+                              "abrirlo para usar la versión nueva")
+            elif resultado.pendiente_subir:
+                texto += " — hay cambios de esta PC pendientes de subir"
+        elif resultado.estado in ("sin_conexion", "desactivado"):
+            texto, color = resultado.mensaje, COLOR_ALERTA
+        elif resultado.estado == "conflicto":
+            texto, color = resultado.mensaje, COLOR_ERROR
+        else:
+            texto, color = f"Error de sincronización: {resultado.mensaje}", COLOR_ERROR
+        self.estado_sync = (texto, color)
+        self._refrescar_controles_inicio()
+
+    def _refrescar_controles_inicio(self):
+        """Línea de estado, tarjetas y botón 'Sincronizar ahora' de la
+        pantalla de inicio (si está a la vista)."""
+        texto, color = self.estado_sync
+        if self._existe(self.lbl_estado_sync):
+            self.lbl_estado_sync.configure(text=texto, fg=color)
+        estado_tarjetas = "disabled" if self.sync_en_curso else "normal"
+        for boton in self.botones_tarjetas:
+            if self._existe(boton):
+                boton.configure(state=estado_tarjetas)
+        if self._existe(self.btn_sync_ahora):
+            bloqueado = self.sync_en_curso or self.proceso_en_curso or self.sync_desactivado
+            self.btn_sync_ahora.configure(state="disabled" if bloqueado else "normal")
+
+    def _sync_a_salida(self, widget_texto, resultado):
+        if not self._existe(widget_texto):
+            return
+        etiqueta = {
+            "conflicto": "error", "error": "error",
+            "sin_conexion": "alerta", "desactivado": "alerta",
+        }.get(resultado.estado)
+        widget_texto.insert(tk.END, f"[GitHub] {resultado.mensaje}\n", etiqueta)
+        if resultado.detalle and resultado.estado not in ("ok", "sin_cambios"):
+            widget_texto.insert(tk.END, resultado.detalle.rstrip() + "\n", etiqueta)
+        widget_texto.see(tk.END)
+
+    def _bajar_antes(self, widget_texto, botones, continuar):
+        """Limpia la salida, corre bajar_cambios() y llama a
+        continuar(resultado). resultado es None si la sincronización está
+        desactivada."""
+        if self.proceso_en_curso or self.sync_en_curso:
+            return
+        for b in botones:
+            b.configure(state="disabled")
+        widget_texto.delete("1.0", tk.END)
+        if self.sync_desactivado:
+            continuar(None)
+            return
+        widget_texto.insert(tk.END, "Buscando cambios en GitHub…\n")
+
+        def fin(resultado):
+            if not self._existe(widget_texto):
+                return  # se cambió de pantalla mientras se sincronizaba
+            self._sync_a_salida(widget_texto, resultado)
+            continuar(resultado)
+
+        self._sync_async(bajar_cambios, fin)
+
+    def _bajar_antes_de_preview(self, widget_texto, botones, ejecutar):
+        """Antes de una vista previa: baja cambios e informa. La vista previa
+        corre siempre (es de solo lectura); el bloqueo real está en Confirmar."""
+        def continuar(resultado):
+            if resultado is not None and resultado.estado in ("conflicto", "error"):
+                widget_texto.insert(
+                    tk.END,
+                    "La vista previa corre igual, pero no vas a poder confirmar hasta "
+                    "resolver esto.\n",
+                    "alerta",
+                )
+            elif resultado is not None and resultado.trajo_cambios:
+                widget_texto.insert(tk.END, "La vista previa usa la versión recién bajada.\n")
+            widget_texto.insert(tk.END, "\n")
+            ejecutar()
+
+        self._bajar_antes(widget_texto, botones, continuar)
+
+    def _bajar_antes_de_confirmar(self, widget_texto, botones, restaurar, invalidar, aplicar):
+        """Antes de 'Confirmar y aplicar': baja cambios otra vez.
+        - Si llegaron cambios nuevos desde la vista previa: invalida la firma
+          y exige una vista previa nueva.
+        - Conflicto o error: cancela.
+        - Sin conexión: pregunta si continuar igual.
+        restaurar() deja los botones de la pantalla en su estado real;
+        aplicar() sigue con la confirmación de siempre."""
+        def continuar(resultado):
+            if resultado is None or resultado.estado in ("sin_cambios", "desactivado"):
+                widget_texto.insert(tk.END, "\n")
+                aplicar()
+                return
+            if resultado.trajo_cambios:
+                invalidar()
+                restaurar()
+                widget_texto.insert(
+                    tk.END,
+                    "\nSe canceló la confirmación: llegaron cambios nuevos desde la vista "
+                    "previa. Corré de nuevo la vista previa.\n",
+                    "error",
+                )
+                messagebox.showwarning(
+                    "Hay que repetir la vista previa",
+                    "Se bajaron cambios nuevos de GitHub desde la última vista previa.\n\n"
+                    "Corré de nuevo la vista previa antes de confirmar.",
+                )
+                return
+            if resultado.estado == "sin_conexion":
+                if messagebox.askyesno(
+                    "Sin conexión con GitHub",
+                    "No se pudo comprobar si la otra PC subió cambios.\n\n"
+                    "¿Querés aplicar los cambios igual? Quedan guardados en esta PC y se "
+                    "suben en la próxima sincronización.",
+                ):
+                    widget_texto.insert(tk.END, "\n")
+                    aplicar()
+                else:
+                    restaurar()
+                return
+            restaurar()
+            widget_texto.insert(
+                tk.END, "\nSe canceló la confirmación por el problema de sincronización.\n",
+                "error",
+            )
+            messagebox.showerror("No se puede confirmar", resultado.mensaje)
+
+        self._bajar_antes(widget_texto, botones, continuar)
+
+    def _al_terminar_ejecucion(self, codigo, widget_texto, botones, restaurar, operacion,
+                               detalle, texto_listo="Cambios aplicados correctamente."):
+        """Cierre común de cada ejecución real. Con código 0 sube los
+        cambios a GitHub con el mensaje automático; con otro código no sube
+        nada."""
+        if codigo != 0:
+            restaurar()
+            messagebox.showerror("Hubo un problema", "Revisá el detalle en el cuadro de salida.")
+            return
+        if self.sync_desactivado:
+            restaurar()
+            messagebox.showinfo("Listo", texto_listo)
+            return
+
+        for b in botones:
+            b.configure(state="disabled")
+        widget_texto.insert(tk.END, "\nSubiendo los cambios a GitHub…\n")
+        widget_texto.see(tk.END)
+
+        def fin(resultado):
+            self._sync_a_salida(widget_texto, resultado)
+            if self._existe(widget_texto):
+                restaurar()
+            texto = f"{texto_listo}\n\nGitHub: {resultado.mensaje}"
+            if resultado.estado in ("ok", "sin_cambios"):
+                messagebox.showinfo("Listo", texto)
+            else:
+                messagebox.showwarning("Listo, con un aviso de GitHub", texto)
+
+        self._sync_async(subir_cambios, fin, mensaje_commit(operacion, detalle))
+
+    def _sync_manual(self):
+        """Botón 'Sincronizar ahora': baja cambios y después sube lo
+        pendiente (por ejemplo, ediciones hechas en el Excel o en el código
+        fuera del programa)."""
+        if self.sync_en_curso or self.proceso_en_curso or self.sync_desactivado:
+            return
+
+        def tras_subir(bajada, subida):
+            texto = f"Bajar: {bajada.mensaje}\n\nSubir: {subida.mensaje}"
+            if subida.estado in ("ok", "sin_cambios"):
+                messagebox.showinfo("Sincronización", texto)
+            else:
+                if subida.detalle:
+                    texto += f"\n\n{subida.detalle}"
+                messagebox.showwarning("Sincronización", texto)
+
+        def tras_bajar(bajada):
+            if bajada.estado not in ("ok", "sin_cambios"):
+                texto = bajada.mensaje + (f"\n\n{bajada.detalle}" if bajada.detalle else "")
+                if bajada.estado in ("conflicto", "error"):
+                    messagebox.showerror("Sincronización", texto)
+                else:
+                    messagebox.showwarning("Sincronización", texto)
+                return
+            self._sync_async(
+                subir_cambios, lambda subida: tras_subir(bajada, subida),
+                mensaje_commit("sincronización manual", "cambios hechos fuera del programa"),
+            )
+
+        self._sync_async(bajar_cambios, tras_bajar)
+
     # ------------------------------------------------------------------
     # Ejecución de comandos en segundo plano (no congela la ventana)
     # ------------------------------------------------------------------
-    def _ejecutar_comando_async(self, cmd, widget_texto, botones, tabla=None, on_finish=None):
-        if self.proceso_en_curso:
+    def _ejecutar_comando_async(self, cmd, widget_texto, botones, tabla=None, on_finish=None,
+                                limpiar_salida=True):
+        if self.proceso_en_curso or self.sync_en_curso:
             return
         self.proceso_en_curso = True
         for b in botones:
@@ -1584,7 +1982,10 @@ class InterfazGiroVivo:
         if tabla is not None:
             self._reiniciar_tabla_items(tabla)
 
-        widget_texto.delete("1.0", tk.END)
+        # limpiar_salida=False cuando la sincronización previa ya escribió
+        # su resultado en el cuadro y no hay que borrarlo.
+        if limpiar_salida:
+            widget_texto.delete("1.0", tk.END)
         widget_texto.insert(tk.END, f"$ {' '.join(cmd[1:])}\n\n")
 
         cola = queue.Queue()

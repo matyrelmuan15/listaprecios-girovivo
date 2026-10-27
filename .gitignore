@@ -5,3 +5,4 @@ __pycache__/
 ~$*
 backup/scripts_*/
 exportacion/backups/
+scripts/config_interfaz.json
