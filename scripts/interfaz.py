@@ -2111,7 +2111,22 @@ class InterfazGiroVivo:
             b.configure(state="normal")
 
 
+def _activar_nitidez_windows():
+    """Evita que Windows agrande la ventana como imagen (texto borroso)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def main():
+    _activar_nitidez_windows()
     root = tk.Tk()
     InterfazGiroVivo(root)
     root.mainloop()
