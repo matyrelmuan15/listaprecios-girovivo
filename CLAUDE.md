@@ -28,6 +28,12 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
    2. Dry-run / simulación con resumen (sin escribir nada).
    3. Ejecución real — solo tras aprobación explícita del usuario.
 
+## Columna ActualizadoSegun y hoja NoActualizados
+- `ActualizadoSegun` (última columna de cada hoja de destino, con lista desplegable) guarda la **última** forma en que se actualizó el precio: `Lista proveedor` (la escribe Tipo 1), `Dólar` (la escribe Tipo 4) o `Manual` (la carga el usuario a mano). Tipo 2 y Tipo 3 no la tocan. Se escribe y registra solo si el valor cambia.
+- La columna se creó una sola vez con `scripts/crear_columna_actualizado.py`. Lógica compartida en `scripts/actualizado_segun.py`.
+- Cada `NOTAS.md` declara en `## Parámetros` la línea `marcas:` (valores de la columna `Marca` que trae ese proveedor, separados por coma).
+- `NoActualizados`: se regenera en cada ejecución real de Tipo 1 con las filas del Excel de esas marcas que no recibieron precio, con su motivo. Nunca incluye códigos de Hoja1. Es hoja de informe (como la columna E de Hoja1): no se registra en `RegistroCambios`, tiene los encabezados en la fila 4 y todos los scripts la excluyen por nombre.
+
 ## Fórmulas obligatorias
 - `PrecioContado` = `='<Hoja>'!$H6-('<Hoja>'!$H6*15/100)` y `PrecioSinIVA` = `='<Hoja>'!$H6/1.21`, donde la letra sale del encabezado `PrecioConIVA`.
 - Tipo 1 y Tipo 4 reponen estas fórmulas en las filas que actualizan (vía `formulas.py`) y lo registran en `RegistroCambios`.
@@ -60,6 +66,8 @@ ListaPreciosGiroVivo/
     ├── actualizar_precio_dolar.py (Tipo 4 — recalcula PrecioConIVA = precio ÷ DolarReferencia actual × dólar nuevo)
     ├── actualizar_fecha.py     (Tipo 3 — solo FechaActualizacion)
     ├── registro.py             (formato único de RegistroCambios, compartido)
+    ├── actualizado_segun.py    (columna ActualizadoSegun y hoja NoActualizados, compartido)
+    ├── crear_columna_actualizado.py (uso único: crea la columna ActualizadoSegun)
     ├── formulas.py             (verificación de fórmulas Contado/SinIVA, compartido)
     ├── dolar.py                (regla única de validación del valor de dólar, compartido)
     ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro)

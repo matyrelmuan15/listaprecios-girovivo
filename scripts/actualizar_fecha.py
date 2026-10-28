@@ -140,7 +140,7 @@ def listar_marcas():
 
     marcas = set()
     for ws in wb.worksheets:
-        if ws.title in (HOJA_ENTRADA, HOJA_EXCLUIDA, HOJA_REGISTRO):
+        if ws.title in (HOJA_ENTRADA, HOJA_EXCLUIDA, HOJA_REGISTRO, "NoActualizados", "Venzo Sin Actualizar"):
             continue
         col_map, _codigo, _nombre = encontrar_columnas(ws, [COL_MARCA])
         if COL_MARCA not in col_map:
@@ -193,7 +193,7 @@ def procesar(marcas_filtro, fecha_nueva_texto, execute, interactivo=False):
     ejemplo_global = None
 
     for ws in wb.worksheets:
-        if ws.title in (HOJA_ENTRADA, HOJA_EXCLUIDA, HOJA_REGISTRO):
+        if ws.title in (HOJA_ENTRADA, HOJA_EXCLUIDA, HOJA_REGISTRO, "NoActualizados", "Venzo Sin Actualizar"):
             continue
 
         col_map, col_codigo, nombre_col = encontrar_columnas(ws, requeridas)

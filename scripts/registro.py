@@ -18,12 +18,13 @@ Formato único (10 columnas, en este orden exacto):
     Fecha            fecha y hora de la corrida, texto dd/mm/aaaa hh:mm
     TipoOperacion    "Precios" (Tipo 1) | "Dolar" (Tipo 2) | "Fecha" (Tipo 3)
                      | "PrecioDolar" (Tipo 4) | "Formulas" (verificar_formulas.py)
+                     | "Estructura" (crear_columna_actualizado.py)
     Hoja             nombre de la hoja destino
     Fila             número de fila modificada
     NombreProducto   valor de la columna NombreProducto de esa fila
     Marca            valor de la columna Marca de esa fila
     Columna          columna modificada (PrecioConIVA / DolarReferencia /
-                     FechaActualizacion)
+                     FechaActualizacion / ActualizadoSegun)
     ValorAnterior    valor previo de esa celda puntual
     ValorNuevo       valor nuevo de esa celda puntual
     Detalle          contexto de la corrida (proveedor, fórmula y dólar
@@ -73,6 +74,7 @@ TIPO_DOLAR = "Dolar"
 TIPO_PRECIO_DOLAR = "PrecioDolar"
 TIPO_FECHA = "Fecha"
 TIPO_FORMULAS = "Formulas"
+TIPO_ESTRUCTURA = "Estructura"  # crear_columna_actualizado.py (encabezados nuevos)
 
 
 class RegistroError(Exception):

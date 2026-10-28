@@ -79,6 +79,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 import formulas
+import actualizado_segun as act
 import registro
 from dolar import validar_dolar
 from ia_revision import (
@@ -94,6 +95,8 @@ ARCHIVO_PATH = PROJECT_ROOT / "archivo" / "Lista de Precios Giro Vivo 2026.xlsx"
 SHEET_EXCLUDE = "Marcas Actualización Dinámica"
 # El formato de RegistroCambios es único y compartido: vive en registro.py.
 SHEET_REGISTRO = registro.HOJA_REGISTRO
+# Hojas de informe que nunca son destino.
+HOJAS_INFORME = (act.HOJA_NO_ACTUALIZADOS,) + act.HOJAS_REEMPLAZADAS
 
 # Encabezados que buscamos en la fila 1 de cada hoja (por nombre exacto, sin
 # distinguir mayúsculas/minúsculas ni espacios al principio/final).
@@ -295,7 +298,7 @@ def listar_marcas(archivo_path):
     marcas = set()
     try:
         for ws in wb.worksheets:
-            if ws.title in (SHEET_EXCLUDE, SHEET_REGISTRO):
+            if ws.title in (SHEET_EXCLUDE, SHEET_REGISTRO) + HOJAS_INFORME:
                 continue
             col_marca = None
             primera_fila = next(ws.iter_rows(min_row=1, max_row=1), None)
@@ -387,7 +390,7 @@ def procesar(args, interactivo=False):
     ejemplo_global = None
 
     for ws in wb.worksheets:
-        if ws.title == SHEET_EXCLUDE or ws.title == SHEET_REGISTRO:
+        if ws.title in (SHEET_EXCLUDE, SHEET_REGISTRO) + HOJAS_INFORME:
             continue
 
         # "Marca" se localiza siempre, aunque el modo no filtre por ella:
@@ -405,6 +408,7 @@ def procesar(args, interactivo=False):
         c_dolar = col_map[COL_DOLAR]
         c_fecha = col_map[COL_FECHA]
         c_marca = col_map.get(COL_MARCA)
+        c_actualizado = act.buscar_columna(ws)
 
         candidatas = 0
         omitidas_dolar = 0
@@ -469,6 +473,10 @@ def procesar(args, interactivo=False):
                 "col_precio": c_precio,
                 "col_dolar": c_dolar,
                 "col_fecha": c_fecha,
+                "col_actualizado": c_actualizado,
+                "actualizado_anterior": (
+                    ws.cell(row=row_idx, column=c_actualizado).value if c_actualizado else None
+                ),
             }
             cambios_a_aplicar.append(cambio)
 
@@ -516,6 +524,19 @@ def procesar(args, interactivo=False):
             corrida.agregar(columna=COL_FECHA,
                             valor_anterior=cambio["fecha_anterior"],
                             valor_nuevo=cambio["fecha_nueva"], **comunes)
+        # ActualizadoSegun = "Dólar", solo si la hoja tiene la columna y el
+        # valor cambia (si ya decía "Dólar" no es una celda modificada).
+        cambio["escribir_actualizado"] = (
+            cambio["col_actualizado"] is not None
+            and cambio["actualizado_anterior"] != act.VALOR_DOLAR
+        )
+        if cambio["escribir_actualizado"]:
+            corrida.agregar(columna=act.COL_ACTUALIZADO,
+                            valor_anterior=cambio["actualizado_anterior"],
+                            valor_nuevo=act.VALOR_DOLAR, **comunes)
+    total_actualizado = sum(1 for c in cambios_a_aplicar if c["escribir_actualizado"])
+    hojas_sin_actualizado = sorted({c["hoja"] for c in cambios_a_aplicar
+                                    if c["col_actualizado"] is None})
 
     # Fórmulas de PrecioContado y PrecioSinIVA en las filas que se recalculan:
     # si alguna perdió la fórmula, se repone y se registra celda por celda.
@@ -532,6 +553,12 @@ def procesar(args, interactivo=False):
         formulas.imprimir_resumen(
             cambios_formulas, [], titulo="Fórmulas de contado y sin IVA en las filas a recalcular"
         )
+
+    if cambios_a_aplicar:
+        print(f"\nCeldas {act.COL_ACTUALIZADO} que pasan a '{act.VALOR_DOLAR}': {total_actualizado}")
+        if hojas_sin_actualizado:
+            print(f"AVISO: hoja(s) sin columna '{act.COL_ACTUALIZADO}' (el precio se "
+                  f"recalcula igual): {', '.join(hojas_sin_actualizado)}")
 
     if not cambios_a_aplicar:
         print("\nNo hay ninguna fila para modificar. No se hizo backup ni se escribió nada.")
@@ -595,6 +622,8 @@ def procesar(args, interactivo=False):
         ws.cell(row=cambio["fila"], column=cambio["col_dolar"]).value = cambio["dolar_nuevo"]
         if cambio["fecha_nueva"] is not None:
             ws.cell(row=cambio["fila"], column=cambio["col_fecha"]).value = cambio["fecha_nueva"]
+        if cambio["escribir_actualizado"]:
+            ws.cell(row=cambio["fila"], column=cambio["col_actualizado"]).value = act.VALOR_DOLAR
 
     # --- Registrar en RegistroCambios ---
     # Verificación de conteo obligatoria (regla 8): 3 celdas por producto
@@ -606,6 +635,7 @@ def procesar(args, interactivo=False):
         formulas.aplicar(wb, cambios_formulas)
         corrida.verificar_conteo(
             len(cambios_a_aplicar) * celdas_por_producto + len(cambios_formulas)
+            + total_actualizado
         )
         corrida.escribir(wb)
     except registro.RegistroError as e:

@@ -15,3 +15,4 @@ Ninguna adicional a las generales del `CLAUDE.md`. Aplica el flujo estándar de 
 ## Parámetros para el script (uso interno — no modificar el formato de esta sección)
 tipo: porcentaje_compuesto
 pasos: 0.81, 0.21
+marcas: ZIROOX

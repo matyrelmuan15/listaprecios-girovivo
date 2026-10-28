@@ -48,6 +48,7 @@ from pathlib import Path
 
 import openpyxl
 
+import actualizado_segun as act
 import formulas
 import registro
 from asignar_dolar import COL_DOLAR
@@ -70,6 +71,8 @@ PROVEEDORES_DIR = PROJECT_ROOT / "proveedores"
 HOJA_EXCLUIDA = "Marcas Actualización Dinámica"
 HOJA_ENTRADA = "Hoja1"
 HOJA_REGISTRO = registro.HOJA_REGISTRO
+# Hojas de informe que nunca son destino (además de Hoja1, la excluida y el registro).
+HOJAS_INFORME = (act.HOJA_NO_ACTUALIZADOS,) + act.HOJAS_REEMPLAZADAS
 
 # El formato de RegistroCambios es único y compartido: vive en registro.py.
 # Este script no define encabezados propios.
@@ -327,6 +330,10 @@ def procesar(proveedor: str, execute: bool, dolar=None):
     # Regla opcional por proveedor: no es parte de la fórmula de precio, así
     # que se saca de params para no alterar el texto de la fórmula.
     limpiar_espacios = params.pop("limpiar_espacios_codigo", "").strip().casefold() in ("si", "sí")
+    # Marcas del proveedor (parámetro "marcas:" del NOTAS.md): definen qué
+    # filas del Excel deberían haberse actualizado, para la hoja NoActualizados.
+    marcas_texto = params.pop("marcas", "").strip()
+    marcas_prov = act.parse_marcas(marcas_texto)
 
     if not ARCHIVO_PATH.exists():
         print(f"ERROR: no se encontró el archivo de trabajo en: {ARCHIVO_PATH}")
@@ -414,11 +421,15 @@ def procesar(proveedor: str, execute: bool, dolar=None):
     hojas_sin_dolar = []  # hojas con matches pero sin columna DolarReferencia
     filas_tocadas = {}  # hoja -> set(filas), para verificar fórmulas
     precios_nuevos = {}  # (hoja, fila) -> PrecioConIVA que va a quedar
+    total_actualizado_segun = 0  # celdas ActualizadoSegun que cambian a "Lista proveedor"
+    hojas_sin_actualizado = []  # hojas con matches pero sin columna ActualizadoSegun
+    no_actualizados = []  # filas de las marcas del proveedor que no recibieron precio
+    codigos_formato_invalido = {norm for norm, _ in avisos_formato}
 
     fecha_hoy = datetime.now().strftime("%d/%m/%Y")
 
     for sheet_name in wb.sheetnames:
-        if sheet_name in (HOJA_ENTRADA, HOJA_EXCLUIDA, HOJA_REGISTRO):
+        if sheet_name in (HOJA_ENTRADA, HOJA_EXCLUIDA, HOJA_REGISTRO) + HOJAS_INFORME:
             continue
 
         ws = wb[sheet_name]
@@ -428,6 +439,8 @@ def procesar(proveedor: str, execute: bool, dolar=None):
         col_fecha = find_header_col(ws, "FechaActualizacion")
         col_nombre = find_header_col(ws, "NombreProducto")
         col_dolar = find_header_col(ws, COL_DOLAR) if dolar is not None else None
+        col_codigodux = find_header_col(ws, "CodigoDux")
+        col_actualizado = act.buscar_columna(ws)
 
         if col_codfac is None or col_precio_iva is None or col_fecha is None:
             # Esta hoja no es una hoja de destino válida para este prompt
@@ -439,14 +452,37 @@ def procesar(proveedor: str, execute: bool, dolar=None):
 
         for row in ws.iter_rows(min_row=2):
             celda_codfac = row[col_codfac - 1]
-            if celda_codfac.value is None:
-                continue
-
-            elementos = [normalize_code(e) for e in str(celda_codfac.value).split(",")]
-            elementos = [e for e in elementos if e]
+            elementos = []
+            if celda_codfac.value is not None:
+                elementos = [normalize_code(e) for e in str(celda_codfac.value).split(",")]
+                elementos = [e for e in elementos if e]
 
             match = next((e for e in elementos if e in precios_parsed), None)
             if match is None:
+                # Fila de una marca de este proveedor que no recibe precio:
+                # va a la hoja NoActualizados con el motivo.
+                marca_fila = row[col_marca - 1].value if col_marca else None
+                if marcas_prov and act.marca_coincide(marca_fila, marcas_prov):
+                    if not elementos:
+                        motivo = act.MOTIVO_SIN_CODIGO
+                    elif any(e in codigos_formato_invalido for e in elementos):
+                        motivo = act.MOTIVO_FORMATO
+                    else:
+                        motivo = act.MOTIVO_NO_EN_LISTA
+                    no_actualizados.append({
+                        "Hoja": sheet_name,
+                        "Fila": celda_codfac.row,
+                        "CodigoDux": row[col_codigodux - 1].value if col_codigodux else None,
+                        "NombreProducto": row[col_nombre - 1].value if col_nombre else None,
+                        "CodigoFactura": celda_codfac.value,
+                        "Marca": marca_fila,
+                        "PrecioConIVA": row[col_precio_iva - 1].value,
+                        "FechaActualizacion": row[col_fecha - 1].value,
+                        "ActualizadoSegun": (
+                            row[col_actualizado - 1].value if col_actualizado else None
+                        ),
+                        "Motivo": motivo,
+                    })
                 continue
 
             precio_original = codigos_hoja1[match]
@@ -494,6 +530,21 @@ def procesar(proveedor: str, execute: bool, dolar=None):
                     valor_anterior=celda_dolar.value, valor_nuevo=dolar,
                 )
 
+            # ActualizadoSegun = "Lista proveedor" (solo si la hoja tiene la
+            # columna y el valor cambia: si ya decía eso, no es una celda
+            # modificada y no se registra).
+            celda_actualizado = row[col_actualizado - 1] if col_actualizado else None
+            escribir_actualizado = (
+                celda_actualizado is not None and celda_actualizado.value != act.VALOR_LISTA
+            )
+            if escribir_actualizado:
+                corrida.agregar(
+                    hoja=sheet_name, fila=fila_num, nombre_producto=nombre_valor,
+                    marca=marca_valor, columna=act.COL_ACTUALIZADO,
+                    valor_anterior=celda_actualizado.value, valor_nuevo=act.VALOR_LISTA,
+                )
+                total_actualizado_segun += 1
+
             if not execute:
                 dry_run_detalle.append({
                     "Hoja": sheet_name, "Fila": fila_num, "Codigo": match,
@@ -505,6 +556,8 @@ def procesar(proveedor: str, execute: bool, dolar=None):
                 celda_fecha.value = fecha_hoy
                 if celda_dolar is not None:
                     celda_dolar.value = dolar
+                if escribir_actualizado:
+                    celda_actualizado.value = act.VALOR_LISTA
 
             filas_tocadas.setdefault(sheet_name, set()).add(fila_num)
             precios_nuevos[(sheet_name, fila_num)] = precio_nuevo
@@ -523,6 +576,8 @@ def procesar(proveedor: str, execute: bool, dolar=None):
             }
             if dolar is not None and col_dolar is None:
                 hojas_sin_dolar.append(sheet_name)
+            if col_actualizado is None:
+                hojas_sin_actualizado.append(sheet_name)
 
     # ---- Columna E de Hoja1: códigos sin match ----
     no_encontrados_ordenados = sorted(codigos_no_encontrados)
@@ -552,6 +607,7 @@ def procesar(proveedor: str, execute: bool, dolar=None):
 
     celdas_modificadas = (
         total_coincidencias * 2 + total_dolares + len(cambios_formulas) + len(limpiezas_codigo)
+        + total_actualizado_segun
     )
     try:
         corrida.verificar_conteo(celdas_modificadas)
@@ -596,6 +652,39 @@ def procesar(proveedor: str, execute: bool, dolar=None):
             print(f"  - {anterior!r} -> {limpio!r}")
         if len(limpiezas_codigo) > 10:
             print(f"  ... y {len(limpiezas_codigo) - 10} más.")
+
+    if hojas_sin_actualizado:
+        print(
+            f"\nAVISO: {len(hojas_sin_actualizado)} hoja(s) sin columna "
+            f"'{act.COL_ACTUALIZADO}' (precio y fecha sí se actualizan). "
+            "Corré crear_columna_actualizado.py para agregarla:"
+        )
+        for hoja in hojas_sin_actualizado:
+            print(f"  - {hoja}")
+    print(f"\nCeldas {act.COL_ACTUALIZADO} que pasan a '{act.VALOR_LISTA}': {total_actualizado_segun}")
+
+    # ---- Productos del proveedor que no se actualizaron ----
+    print("\n=== PRODUCTOS NO ACTUALIZADOS ===")
+    if not marcas_prov:
+        print(
+            f"AVISO: el NOTAS.md de '{proveedor}' no tiene el parámetro 'marcas:', "
+            f"así que no se puede armar la hoja '{act.HOJA_NO_ACTUALIZADOS}'."
+        )
+    else:
+        print(f"Marcas del proveedor: {marcas_texto}")
+        print(f"Filas de esas marcas que NO recibieron precio: {len(no_actualizados)}")
+        for item in no_actualizados:
+            print(
+                f"  - [{item['Hoja']}] fila {item['Fila']} | {item['NombreProducto']} "
+                f"| código: {item['CodigoFactura']} | {item['Motivo']}"
+            )
+        if execute:
+            act.escribir_hoja_no_actualizados(
+                wb, proveedor, marcas_texto, fecha_hoy, no_actualizados
+            )
+            print(f"Detalle guardado en la hoja '{act.HOJA_NO_ACTUALIZADOS}'.")
+        else:
+            print(f"(Al aplicar, este listado se guarda en la hoja '{act.HOJA_NO_ACTUALIZADOS}'.)")
 
     print(f"\nCódigos de Hoja1 sin encontrar: {len(no_encontrados_ordenados)}")
     if no_encontrados_ordenados:

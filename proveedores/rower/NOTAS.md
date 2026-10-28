@@ -15,3 +15,4 @@ Ninguna adicional a las generales del `CLAUDE.md`. Aplica el flujo estándar de 
 ## Parámetros para el script (uso interno — no modificar el formato de esta sección)
 tipo: porcentaje_simple
 porcentaje: 0.20
+marcas: ROWER

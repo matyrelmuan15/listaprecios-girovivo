@@ -21,3 +21,4 @@ Además, aplica el flujo estándar de Tipo 1:
 tipo: porcentaje_compuesto
 pasos: 0.23, 0.21
 limpiar_espacios_codigo: si
+marcas: NEW EVOLUTION

@@ -47,7 +47,8 @@ COL_MARCA = "Marca"
 DESCUENTO_CONTADO_PCT = 15
 DIVISOR_IVA = "1.21"
 
-HOJAS_EXCLUIDAS = {"Marcas Actualización Dinámica", "Hoja1", "RegistroCambios"}
+HOJAS_EXCLUIDAS = {"Marcas Actualización Dinámica", "Hoja1", "RegistroCambios",
+                   "NoActualizados", "Venzo Sin Actualizar"}
 
 MOTIVO_VALOR_FIJO = "valor fijo en lugar de fórmula"
 MOTIVO_VACIA = "celda vacía"

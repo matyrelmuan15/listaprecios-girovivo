@@ -286,7 +286,7 @@ def listar_marcas(archivo_path):
     marcas = set()
     try:
         for ws in wb.worksheets:
-            if ws.title in (SHEET_EXCLUDE, SHEET_REGISTRO):
+            if ws.title in (SHEET_EXCLUDE, SHEET_REGISTRO, "NoActualizados", "Venzo Sin Actualizar"):
                 continue
             col_marca = None
             primera_fila = next(ws.iter_rows(min_row=1, max_row=1), None)
@@ -377,7 +377,7 @@ def procesar(args, interactivo=False):
     cambios_a_aplicar = []  # lista de dicts con todo lo necesario para escribir + registrar
 
     for ws in wb.worksheets:
-        if ws.title == SHEET_EXCLUDE or ws.title == SHEET_REGISTRO:
+        if ws.title in (SHEET_EXCLUDE, SHEET_REGISTRO, "NoActualizados", "Venzo Sin Actualizar"):
             continue
 
         # "Marca" se localiza siempre, aunque el modo no filtre por ella:

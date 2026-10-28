@@ -73,7 +73,8 @@ EXPORT_NOMBRE = "exportacion_giro_vivo.xls"
 EXPORT_PATH = EXPORT_DIR / EXPORT_NOMBRE
 
 # Hojas que no se leen bajo ninguna circunstancia.
-HOJAS_EXCLUIDAS = {"Hoja1", "Marcas Actualización Dinámica", "RegistroCambios"}
+HOJAS_EXCLUIDAS = {"Hoja1", "Marcas Actualización Dinámica", "RegistroCambios",
+                   "NoActualizados", "Venzo Sin Actualizar"}
 
 # Columnas de origen (nombre de encabezado exacto en el libro principal).
 COL_CODIGO_ORIGEN = "CodigoDux"
