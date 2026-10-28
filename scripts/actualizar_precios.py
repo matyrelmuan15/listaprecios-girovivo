@@ -160,6 +160,21 @@ def normalize_code(value):
         return s
 
 
+def quitar_espacios_codigo(value):
+    """Quita TODOS los espacios de un código de Hoja1 (extremos, del medio y
+    no separables). Las comas quedan intactas, así que un código múltiple
+    'A 1, B 2' pasa a 'A1,B2' y se sigue separando igual por coma.
+
+    Devuelve el código limpio, o None si no hay nada que cambiar (valores no
+    texto, sin espacios, o que quedarían vacíos)."""
+    if not isinstance(value, str):
+        return None
+    limpio = re.sub(r"[\s  ]", "", value)
+    if limpio == value or limpio == "":
+        return None
+    return limpio
+
+
 def find_header_col(ws, header_name, max_search_rows=3):
     """Busca en las primeras filas de la hoja una celda cuyo texto
     (normalizado) coincida exactamente con header_name. Devuelve el índice
@@ -309,6 +324,9 @@ def procesar(proveedor: str, execute: bool, dolar=None):
 
     notas_path = PROVEEDORES_DIR / proveedor / "NOTAS.md"
     params = parse_notas_params(notas_path)
+    # Regla opcional por proveedor: no es parte de la fórmula de precio, así
+    # que se saca de params para no alterar el texto de la fórmula.
+    limpiar_espacios = params.pop("limpiar_espacios_codigo", "").strip().casefold() in ("si", "sí")
 
     if not ARCHIVO_PATH.exists():
         print(f"ERROR: no se encontró el archivo de trabajo en: {ARCHIVO_PATH}")
@@ -338,13 +356,22 @@ def procesar(proveedor: str, execute: bool, dolar=None):
         sys.exit(1)
 
     # Construir diccionario código normalizado -> precio original (de Hoja1)
+    # Si el proveedor tiene limpiar_espacios_codigo: si, el matching usa ya
+    # los códigos sin espacios (también en el dry-run).
     codigos_hoja1 = {}  # normalized_code -> precio
+    limpiezas_codigo = []  # lista de (celda, valor_anterior, valor_limpio)
     for row in ws_hoja1.iter_rows(min_row=2):
         celda_codigo = row[col_codigo - 1]
         celda_precio = row[col_precio - 1]
         if celda_codigo.value is None:
             continue
-        norm = normalize_code(celda_codigo.value)
+        valor_codigo = celda_codigo.value
+        if limpiar_espacios:
+            limpio = quitar_espacios_codigo(valor_codigo)
+            if limpio is not None:
+                limpiezas_codigo.append((celda_codigo, valor_codigo, limpio))
+                valor_codigo = limpio
+        norm = normalize_code(valor_codigo)
         if norm == "":
             continue
         codigos_hoja1[norm] = celda_precio.value
@@ -367,7 +394,18 @@ def procesar(proveedor: str, execute: bool, dolar=None):
     )
     if dolar is not None:
         detalle_corrida += f" | Dólar: {dolar}"
+    if limpiar_espacios:
+        detalle_corrida += " | Limpieza de espacios en códigos de Hoja1"
     corrida = registro.RegistroCorrida(registro.TIPO_PRECIOS, detalle_corrida)
+
+    # Una fila de registro por cada código de Hoja1 limpiado (regla 8).
+    for celda_codigo, anterior, limpio in limpiezas_codigo:
+        corrida.agregar(
+            hoja=HOJA_ENTRADA, fila=celda_codigo.row, nombre_producto=None,
+            marca=None, columna="Codigo", valor_anterior=anterior, valor_nuevo=limpio,
+        )
+        if execute:
+            celda_codigo.value = limpio
     dry_run_detalle = []  # lista de dicts con detalle original -> parseado (solo dry-run)
     cambios_precio = []  # lista para la revisión automática de anomalías (IA)
     resumen_por_hoja = {}  # hoja -> {"precios": n, "fechas": n, "dolares": n}
@@ -499,7 +537,8 @@ def procesar(proveedor: str, execute: bool, dolar=None):
     # ---- RegistroCambios ----
     # Verificación de conteo obligatoria (regla 8): 2 celdas por match
     # (PrecioConIVA + FechaActualizacion), más 1 por cada match en que se
-    # escribió DolarReferencia. Se corre antes de escribir, y si falla se
+    # escribió DolarReferencia y 1 por cada código de Hoja1 limpiado de
+    # espacios. Se corre antes de escribir, y si falla se
     # aborta sin guardar.
     # Además se verifican las fórmulas de PrecioContado y PrecioSinIVA de las
     # filas actualizadas: si alguna perdió la fórmula, se repone y se registra
@@ -511,7 +550,9 @@ def procesar(proveedor: str, execute: bool, dolar=None):
     if execute:
         formulas.aplicar(wb, cambios_formulas)
 
-    celdas_modificadas = total_coincidencias * 2 + total_dolares + len(cambios_formulas)
+    celdas_modificadas = (
+        total_coincidencias * 2 + total_dolares + len(cambios_formulas) + len(limpiezas_codigo)
+    )
     try:
         corrida.verificar_conteo(celdas_modificadas)
         if execute:
@@ -549,6 +590,13 @@ def procesar(proveedor: str, execute: bool, dolar=None):
         )
         for hoja in hojas_sin_dolar:
             print(f"  - {hoja}")
+    if limpiar_espacios:
+        print(f"\nCódigos de Hoja1 con espacios (se limpian): {len(limpiezas_codigo)}")
+        for _, anterior, limpio in limpiezas_codigo[:10]:
+            print(f"  - {anterior!r} -> {limpio!r}")
+        if len(limpiezas_codigo) > 10:
+            print(f"  ... y {len(limpiezas_codigo) - 10} más.")
+
     print(f"\nCódigos de Hoja1 sin encontrar: {len(no_encontrados_ordenados)}")
     if no_encontrados_ordenados:
         print(f"  {no_encontrados_ordenados}")
