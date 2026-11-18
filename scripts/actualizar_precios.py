@@ -283,6 +283,15 @@ def parse_precio(value) -> float:
     return float(s)
 
 
+def _parse_o_none(value):
+    """parse_precio() que devuelve None en vez de levantar error, para poder
+    comparar apariciones repetidas de un mismo código en Hoja1."""
+    try:
+        return parse_precio(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def apply_formula(precio: float, params: dict) -> float:
     """Aplica la fórmula de precio del proveedor según los parámetros de su NOTAS.md."""
     tipo = params.get("tipo")
@@ -365,7 +374,12 @@ def procesar(proveedor: str, execute: bool, dolar=None):
     # Construir diccionario código normalizado -> precio original (de Hoja1)
     # Si el proveedor tiene limpiar_espacios_codigo: si, el matching usa ya
     # los códigos sin espacios (también en el dry-run).
-    codigos_hoja1 = {}  # normalized_code -> precio
+    # Si un código aparece en varias filas, queda el precio MÁS ALTO (comparado
+    # con parse_precio, nunca con el valor crudo), sin importar el orden. Si
+    # solo una aparición se puede interpretar, queda esa; si ninguna, queda la
+    # última (y sale en el aviso de formato, como antes).
+    codigos_hoja1 = {}  # normalized_code -> precio (valor crudo elegido)
+    apariciones_hoja1 = {}  # normalized_code -> [valores crudos, en orden]
     limpiezas_codigo = []  # lista de (celda, valor_anterior, valor_limpio)
     for row in ws_hoja1.iter_rows(min_row=2):
         celda_codigo = row[col_codigo - 1]
@@ -381,7 +395,28 @@ def procesar(proveedor: str, execute: bool, dolar=None):
         norm = normalize_code(valor_codigo)
         if norm == "":
             continue
-        codigos_hoja1[norm] = celda_precio.value
+        valor_nuevo = celda_precio.value
+        apariciones_hoja1.setdefault(norm, []).append(valor_nuevo)
+        if norm not in codigos_hoja1:
+            codigos_hoja1[norm] = valor_nuevo
+            continue
+        parsed_actual = _parse_o_none(codigos_hoja1[norm])
+        parsed_nuevo = _parse_o_none(valor_nuevo)
+        if parsed_nuevo is None and parsed_actual is None:
+            codigos_hoja1[norm] = valor_nuevo  # comportamiento previo: queda el último
+        elif parsed_nuevo is not None and (parsed_actual is None or parsed_nuevo > parsed_actual):
+            codigos_hoja1[norm] = valor_nuevo
+
+    # Códigos repetidos con montos distintos (solo informativo para el resumen).
+    # Si todas las apariciones interpretables valen lo mismo y no hay ninguna
+    # ininterpretable, no se avisa.
+    repetidos_distintos = []  # lista de (norm, [valores crudos], valor elegido)
+    for norm, valores in apariciones_hoja1.items():
+        if len(valores) < 2:
+            continue
+        parseados = [_parse_o_none(v) for v in valores]
+        if len(set(parseados)) > 1:
+            repetidos_distintos.append((norm, valores, codigos_hoja1[norm]))
 
     # Pre-parseo de precios de Hoja1: normaliza cualquier formato habitual
     # (número de Excel, argentino, anglosajón, con $ o espacios) y separa los
@@ -695,6 +730,19 @@ def procesar(proveedor: str, execute: bool, dolar=None):
     if avisos_formato_ordenados:
         for norm, valor_original in avisos_formato_ordenados:
             print(f"  - Código '{norm}': valor original {valor_original!r}")
+
+    def _monto_texto(valor):
+        parsed = _parse_o_none(valor)
+        return f"{parsed:.2f}" if parsed is not None else f"{valor!r} (no interpretable)"
+
+    repetidos_ordenados = sorted(repetidos_distintos, key=lambda item: item[0])
+    print(
+        "\nAVISO: códigos repetidos en Hoja1 con montos distintos "
+        f"(se usa el más alto): {len(repetidos_ordenados)}"
+    )
+    for norm, valores, elegido in repetidos_ordenados:
+        montos = ", ".join(_monto_texto(v) for v in valores)
+        print(f"  - Código '{norm}': montos {montos} -> elegido {_monto_texto(elegido)}")
 
     formulas.imprimir_resumen(
         cambios_formulas, [], titulo="Fórmulas de contado y sin IVA en las filas actualizadas"
