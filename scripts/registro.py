@@ -19,6 +19,9 @@ Formato único (10 columnas, en este orden exacto):
     TipoOperacion    "Precios" (Tipo 1) | "Dolar" (Tipo 2) | "Fecha" (Tipo 3)
                      | "PrecioDolar" (Tipo 4) | "Formulas" (verificar_formulas.py)
                      | "Estructura" (crear_columna_actualizado.py)
+                     | "Eliminacion" (eliminación de filas completas; una
+                       fila de registro por fila eliminada, con
+                       Columna = "Fila completa")
     Hoja             nombre de la hoja destino
     Fila             número de fila modificada
     NombreProducto   valor de la columna NombreProducto de esa fila
@@ -75,6 +78,7 @@ TIPO_PRECIO_DOLAR = "PrecioDolar"
 TIPO_FECHA = "Fecha"
 TIPO_FORMULAS = "Formulas"
 TIPO_ESTRUCTURA = "Estructura"  # crear_columna_actualizado.py (encabezados nuevos)
+TIPO_ELIMINACION = "Eliminacion"  # eliminación de filas completas (Columna = "Fila completa")
 
 
 class RegistroError(Exception):
