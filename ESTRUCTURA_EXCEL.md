@@ -17,7 +17,8 @@
 - Accesorios
 - Repuestos
 - RegistroCambios (hoja de trazabilidad)
-- **Marcas Actualización Dinámica** (EXCLUIR SIEMPRE — no leer, no escribir)
+- NoActualizados (hoja de informe que regenera Tipo 1; ver sección propia)
+- **Marcas Actualización Dinámica** (EXCLUIR SIEMPRE — solo la lee el control de capacidad de `verificar_formulas.py`; se modifica solo con autorización expresa)
 
 ## Detalle por hoja
 
@@ -29,7 +30,13 @@
 ### Hojas destino por marca/categoría
 Las 11 hojas de destino (Bicicletas MTB, Bicicletas Ruta, Bicicletas Gravel, Bicicletas Paseo, Bicicletas BMX-Infantiles, Indumentaria, Computadoras, Cuadros, Nutricional, Accesorios, Repuestos) comparten **exactamente el mismo esquema de encabezados** (fila 1):
 
-`FechaActualizacion`, `CodigoDux`, `NombreProducto`, `CodigoFactura`, `Marca`, `PrecioContado`, `PrecioSinIVA`, `PrecioConIVA`, `DolarReferencia`
+`FechaActualizacion`, `CodigoDux`, `NombreProducto`, `CodigoFactura`, `Marca`, `PrecioContado`, `PrecioSinIVA`, `PrecioConIVA`, `DolarReferencia`, `ActualizadoSegun`
+
+y, solo en las hojas donde ya se asignó categoría, `Categoria` a continuación (ver más abajo).
+
+- Las tablas de Excel `Table_1` … `Table_11` cubren solo de `FechaActualizacion` a `DolarReferencia` (A:I). `ActualizadoSegun` y `Categoria` quedan **fuera** de las tablas, a propósito: las tablas alimentan las fórmulas de `Marcas Actualización Dinámica` y no se amplían.
+- `ActualizadoSegun` (columna J): lista desplegable `Manual` / `Dólar` / `Lista proveedor` en J2:J5000. Creada una sola vez con `scripts/crear_columna_actualizado.py`.
+- `Categoria` (columna K): texto libre, sin lista desplegable por ahora. Se crea y se completa con `scripts/asignar_categoria.py` (ver sección propia).
 
 Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos una celda no vacía, a partir de la fila 2):
 
@@ -57,9 +64,42 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 - En `Accesorios`, las primeras filas relevadas corresponden a lo que parecen ser **encabezados de subcategoría** (ej. `'ACEITES'`, `'ASIENTOS'` en la columna `NombreProducto`, con el resto de columnas vacías o en 0) — a tener en cuenta al filtrar filas de producto real vs. filas de agrupación visual.
 - `NombreProducto` en `Nutricional` presenta problemas de codificación de caracteres especiales preexistentes en el archivo (ej. `amino�cidos` en vez de `aminoácidos`) — no es un artefacto de este relevamiento.
 
+### Columna Categoria (`scripts/asignar_categoria.py`)
+- Aplicada el 23/11/2026 a las 5 hojas de bicicletas (`--filtro "bicicleta" --valor "Bicicletas"`): columna **K** en Bicicletas MTB (128 filas), Ruta (41), Gravel (11), Paseo (12) y BMX-Infantiles (46). En total, 5 encabezados + 238 valores = 243 celdas y 243 filas de `RegistroCambios`. Backup previo: `backup/Lista de Precios Giro Vivo 2026_20261123_113302.xlsx`.
+- Las demás hojas todavía no tienen la columna.
+- Uso (desde `scripts/`):
+  - `python asignar_categoria.py --filtro "<fragmento>" --valor "<Categoría>"` → inspección + dry-run (no escribe).
+  - Mismo comando con `--execute` → backup + escritura.
+  - `--filtro` se puede repetir y compara contra el nombre de la hoja sin importar mayúsculas ni acentos. `--sobrescribir` reemplaza celdas que ya tienen **otra** categoría (por defecto no se tocan y se informan).
+- Si la hoja no tiene `Categoria`, se crea en la primera columna libre a la derecha del último encabezado, copiando el formato y el ancho del encabezado vecino. Si ya existe, se usa esa.
+- Fila de producto = fila con `CodigoDux` no vacío. Las celdas que ya tienen el valor pedido se saltean, así que correrlo dos veces no cambia nada.
+- Siempre excluye Hoja1, Marcas Actualización Dinámica, RegistroCambios, NoActualizados y Venzo Sin Actualizar, y solo procesa hojas con `CodigoDux` y `PrecioConIVA` en la fila 1.
+
+### NoActualizados (hoja de informe)
+- La regenera cada ejecución real de Tipo 1 (`actualizar_precios.py`) con las filas de las marcas del proveedor (línea `marcas:` de su `NOTAS.md`) que no recibieron precio, y su motivo.
+- Encabezados en la **fila 4**: `Hoja`, `Fila`, `CodigoDux`, `NombreProducto`, `CodigoFactura`, `Marca`, `PrecioConIVA`, `FechaActualizacion`, `ActualizadoSegun`, `Motivo`.
+- No se registra en `RegistroCambios` y todos los scripts la excluyen por nombre.
+
 ### Marcas Actualización Dinámica (EXCLUIR SIEMPRE)
 - Encabezados no siguen el esquema estándar: `Marca`, `Fecha Más Antigua`, `Necesita Actualización`, (columna vacía), `PRODUCTOS DESACTUALIZADOS (más de 30 días) - Lista Dinámica`, y varias columnas adicionales con `ArrayFormula` (fórmulas matriciales) y sub-encabezados (`Producto`, `Marca`, `Fecha Última Actualización`, `Días Sin Actualizar`).
-- `max_row`: 3000. No se debe leer ni escribir en esta hoja bajo ninguna circunstancia, según CLAUDE.md.
+- `max_row`: 5000 (dimensión A1:M5000 desde el 22/11/2026).
+- 6 fórmulas matriciales de rango fijo (`t="array"`), ampliadas el 22/11/2026 con `scripts/ampliar_marcas.py` y envueltas en `EXPAND(TAKE(…))` para que rellenen con "" en lugar de dar `#N/A`:
+
+  | Celda | Rango | Contenido | Capacidad |
+  |---|---|---|---|
+  | J1 | J1:J5000 | `EXPAND(TAKE(VSTACK(Table_1[NombreProducto],…,Table_11[NombreProducto]),5000),5000,,"")` | 5.000 filas de tablas |
+  | K1 | K1:K5000 | ídem sobre `[Marca]` | 5.000 |
+  | L1 | L1:L5000 | ídem sobre `[FechaActualizacion]` | 5.000 |
+  | M1 | M1:M5000 | `EXPAND(TAKE(MAP(ANCHORARRAY(L1),LAMBDA(…fecha de texto a número…)),5000),5000,,"")` | 5.000 |
+  | A2 | A2:C201 | `EXPAND(TAKE(LET(…marca, fecha más antigua, "Sí"/"No"…),200),200,3,"")` | 200 marcas |
+  | E3 | E3:H3000 | `EXPAND(TAKE(LET(…productos con más de 30 días…),2998),2998,4,"")` | 2.998 productos |
+
+  El orden de las tablas en `VSTACK` es `Table_1` … `Table_11` (Repuestos al final). Las demás celdas de los rangos son celdas de derrame de esas matrices (en el XML, `<f ca="1"/>` o `<f />` según quién guardó el libro).
+- Al guardar con openpyxl se conservan el texto y el rango de las 6 fórmulas; se pierden los valores cacheados y el atributo `ca`, y Excel recalcula al abrir (verificado sin errores).
+- `verificar_formulas.py` controla en cada corrida (solo lectura) que las filas de las tablas, las marcas con fecha y los productos desactualizados no superen el 90 % de la capacidad, y que las 6 fórmulas mantengan `EXPAND(TAKE(`.
+- Otros elementos: formato condicional en `A2:C600` (`$C2="Sí"`) y `E3:H3000` (`$E3<>""`, `$H3>90`); celda combinada `E1:H1`; panel inmovilizado en la fila 2; columnas J:M agrupadas (nivel 1).
+- El autofiltro `A1:C41` (y su nombre definido `_xlnm._FilterDatabase` en `workbook.xml`) está **desactualizado**: no cubre todo el rango A2:C201. Se dejó así a propósito.
+- No se escribe en esta hoja salvo con autorización expresa del usuario para esa tarea, editando solo el XML de la hoja (nunca con openpyxl).
 
 ### RegistroCambios (trazabilidad)
 - Encabezados (formato único, 10 columnas): `Fecha`, `TipoOperacion`, `Hoja`, `Fila`, `NombreProducto`, `Marca`, `Columna`, `ValorAnterior`, `ValorNuevo`, `Detalle`
@@ -82,6 +122,8 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 - `PrecioSinIVA`
 - `PrecioConIVA`
 - `DolarReferencia`
+- `ActualizadoSegun`
+- `Categoria` (por ahora solo en las 5 hojas de bicicletas)
 
 **Hoja1 (staging):**
 - `CODIGO`
@@ -89,7 +131,7 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 
 **RegistroCambios (formato único, definido en `scripts/registro.py`):**
 - `Fecha`
-- `TipoOperacion`
+- `TipoOperacion` (`Precios`, `Dolar`, `PrecioDolar`, `Fecha`, `Formulas`, `Estructura`, `Eliminacion`, `Categoria`; `Eliminacion` lo usa `scripts/eliminar_filas_sin_fecha.py`, con una fila por fila eliminada y `Columna` = `Fila completa`; `Estructura` registra encabezados nuevos, con `Columna` = letra; `Categoria` lo usa `scripts/asignar_categoria.py`, una fila por celda, con `Columna` = `Categoria`)
 - `Hoja`
 - `Fila`
 - `NombreProducto`

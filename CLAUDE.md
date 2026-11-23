@@ -7,7 +7,7 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 - `Hoja1`: hoja de entrada, donde el usuario pega manualmente la lista del proveedor antes de cada corrida.
 - Resto de las hojas: hojas de destino por marca/categoría (columnas `CodigoFac`/`CodigoFactura`, `Marca`, `PrecioConIVA`, `DolarRef`/`DolarReferencia`, `FechaActualizacion`, etc.).
 - El número de hojas y filas **no es fijo**: recorrer siempre todas las hojas dinámicamente, nunca asumir una lista cerrada.
-- **Hoja excluida siempre:** `Marcas Actualización Dinámica`. No se lee ni se modifica en ningún prompt.
+- **Hoja excluida siempre:** `Marcas Actualización Dinámica`. Ningún script de actualización la lee ni la modifica. Única excepción de lectura: el control de capacidad de `verificar_formulas.py` (solo lectura). Solo se modifica con autorización expresa del usuario para esa tarea (ver sección propia más abajo).
 - Hoja de trazabilidad: `RegistroCambios` (se crea si no existe, antes de escribir cualquier cambio).
 
 ## Reglas obligatorias (aplican siempre)
@@ -18,7 +18,7 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
    - Precios: número (float, 2 decimales máximo).
    - Fechas: texto en formato `dd/mm/aaaa`.
 5. Matching de códigos: split por coma + strip + comparación de **igualdad exacta normalizada** (cuidado con tipos int/float/str que pueden diferir entre columnas — nunca comparar por substring o coincidencia parcial).
-6. Excluir siempre la hoja `Marcas Actualización Dinámica`.
+6. Excluir siempre la hoja `Marcas Actualización Dinámica` (salvo la lectura del control de capacidad de `verificar_formulas.py`; modificarla requiere autorización expresa).
 7. Recorrer todas las hojas del libro **dinámicamente** en cada corrida — pueden agregarse categorías nuevas con el tiempo.
 8. Todo cambio se registra en `RegistroCambios`, con **una fila por cada celda modificada** (si se tocan 2 columnas en la misma fila, son 2 registros). El total de filas de `RegistroCambios` debe coincidir exactamente con la cantidad de celdas modificadas.
    - El formato es **único y compartido** por los tres scripts, y vive en `scripts/registro.py`: `Fecha | TipoOperacion | Hoja | Fila | NombreProducto | Marca | Columna | ValorAnterior | ValorNuevo | Detalle`. Ningún script define encabezados propios.
@@ -34,10 +34,26 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 - Cada `NOTAS.md` declara en `## Parámetros` la línea `marcas:` (valores de la columna `Marca` que trae ese proveedor, separados por coma).
 - `NoActualizados`: se regenera en cada ejecución real de Tipo 1 con las filas del Excel de esas marcas que no recibieron precio, con su motivo. Nunca incluye códigos de Hoja1. Es hoja de informe (como la columna E de Hoja1): no se registra en `RegistroCambios`, tiene los encabezados en la fila 4 y todos los scripts la excluyen por nombre.
 
+## Columna Categoria
+- Columna de texto libre (sin lista desplegable por ahora) que se crea y completa con `scripts/asignar_categoria.py --filtro "<fragmento de hoja>" --valor "<Categoría>"` (dry-run por defecto; `--execute` para escribir; `--sobrescribir` para pisar otra categoría).
+- Se agrega en la primera columna libre al final (nunca en el medio) y queda fuera de las tablas `Table_N`. Fila de producto = `CodigoDux` no vacío.
+- Registro: encabezado nuevo → `TipoOperacion` `Estructura`; cada valor → `TipoOperacion` `Categoria` (una fila por celda).
+- Aplicada el 23/11/2026 a las 5 hojas de bicicletas (columna K, valor `Bicicletas`). Las demás hojas, pendientes.
+
 ## Fórmulas obligatorias
 - `PrecioContado` = `='<Hoja>'!$H6-('<Hoja>'!$H6*15/100)` y `PrecioSinIVA` = `='<Hoja>'!$H6/1.21`, donde la letra sale del encabezado `PrecioConIVA`.
 - Tipo 1 y Tipo 4 reponen estas fórmulas en las filas que actualizan (vía `formulas.py`) y lo registran en `RegistroCambios`.
 - `verificar_formulas.py` revisa y repara todo el libro (y redondea `PrecioConIVA` a 2 decimales).
+
+## Hoja Marcas Actualización Dinámica
+- Se alimenta sola de las tablas `Table_1` … `Table_11` con 6 fórmulas matriciales de **rango fijo** (openpyxl no conserva las matrices dinámicas de Excel y fija el rango al guardar).
+- Desde el 22/11/2026 (`scripts/ampliar_marcas.py`) las 6 están envueltas en `EXPAND(TAKE(…))`, de modo que rellenan con "" en lugar de dar `#N/A` y no pierden productos mientras no se supere la capacidad:
+  - J1:J5000, K1:K5000, L1:L5000, M1:M5000 → **5.000** filas de tablas.
+  - A2:C201 → **200** marcas.
+  - E3:H3000 → **2.998** productos desactualizados.
+- `verificar_formulas.py` hace en cada corrida un control **de solo lectura**: avisa "ampliar el rango de la hoja Marcas" si alguna medida supera el 90 % de su capacidad, o si alguna de las 6 fórmulas perdió `EXPAND(TAKE(`. No escribe en el libro ni en `RegistroCambios`.
+- Ampliar o modificar la hoja requiere **autorización expresa** del usuario para esa tarea, se hace editando solo el XML de la hoja (nunca con openpyxl) y con el flujo de 3 fases.
+- El autofiltro `A1:C41` de la hoja está desactualizado; se dejó como está a propósito (su nombre definido vive en `workbook.xml`).
 
 ## Decisión de arquitectura
 No agrupar proveedores por fórmula compartida, aunque hoy coincida el porcentaje entre dos o más. Cada proveedor tiene su propia carpeta y `NOTAS.md` independiente, porque las fórmulas pueden cambiar de forma desacoplada con el tiempo.
@@ -68,9 +84,12 @@ ListaPreciosGiroVivo/
     ├── registro.py             (formato único de RegistroCambios, compartido)
     ├── actualizado_segun.py    (columna ActualizadoSegun y hoja NoActualizados, compartido)
     ├── crear_columna_actualizado.py (uso único: crea la columna ActualizadoSegun)
+    ├── asignar_categoria.py    (crea/completa la columna Categoria en las hojas filtradas; registra "Estructura" y "Categoria")
     ├── formulas.py             (verificación de fórmulas Contado/SinIVA, compartido)
     ├── dolar.py                (regla única de validación del valor de dólar, compartido)
-    ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro)
+    ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro + control de capacidad de Marcas, solo lectura)
+    ├── ampliar_marcas.py       (amplía las 6 fórmulas de Marcas editando solo su XML; requiere autorización expresa)
+    ├── eliminar_filas_sin_fecha.py (elimina filas completas sin FechaActualizacion editando el XML; registra TipoOperacion "Eliminacion")
     ├── migrar_registro.py      (migración de un solo uso de RegistroCambios)
     ├── ia_revision.py          (revisión automática de anomalías)
     ├── sincronizar_git.py      (sincronización con GitHub, usada por la interfaz)

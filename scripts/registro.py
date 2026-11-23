@@ -79,6 +79,7 @@ TIPO_FECHA = "Fecha"
 TIPO_FORMULAS = "Formulas"
 TIPO_ESTRUCTURA = "Estructura"  # crear_columna_actualizado.py (encabezados nuevos)
 TIPO_ELIMINACION = "Eliminacion"  # eliminación de filas completas (Columna = "Fila completa")
+TIPO_CATEGORIA = "Categoria"  # asignar_categoria.py (valores de la columna Categoria)
 
 
 class RegistroError(Exception):
