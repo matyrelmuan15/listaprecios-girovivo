@@ -39,7 +39,9 @@ y `Categoria` a continuación (columna K en las 11 hojas; ver más abajo).
 - Las fórmulas de `Marcas Actualización Dinámica` usan las tablas solo por nombre de columna (`Table_N[NombreProducto]`, `[Marca]`, `[FechaActualizacion]`), así que ampliarlas hacia la derecha no las afecta.
 - Gravel, Cuadros y Nutricional no tienen botones de filtro en el encabezado (las demás sí). No hay filtros guardados activos desde el 23/11/2026.
 - En Bicicletas MTB el fondo azul de los encabezados lo da el **estilo de la tabla** (las celdas tienen letra blanca sin fondo propio); en las demás hojas lo tiene cada celda. Por eso una columna fuera de la tabla en MTB se ve blanco sobre blanco.
-- `ActualizadoSegun` (columna J): lista desplegable `Manual` / `Dólar` / `Lista proveedor` en J2:J5000. Creada una sola vez con `scripts/crear_columna_actualizado.py`.
+- `ActualizadoSegun` (columna J): lista desplegable `Manual` / `Dólar` / `Lista proveedor`. Creada una sola vez con `scripts/crear_columna_actualizado.py`.
+  - **Criterio del rango:** en las 11 hojas la validación va de **J2 a J5000**, en un solo rango continuo y sin huecos, aunque la tabla termine antes. Es a propósito: así las filas nuevas que se agreguen desde Excel tienen la lista desplegable siempre. No ajustarla a la última fila de la tabla.
+  - Si una tabla llega a superar la fila 5000, hay que ampliar el criterio. `scripts/ordenar_validacion_nombres.py` lo controla en la inspección y aborta en ese caso; es el script que empareja los rangos (Ruta J5001, Repuestos J4934, Accesorios J4830, Computadoras J4999 e Indumentaria J2:J210 J212:J5015 quedaron en J2:J5000).
 - `Categoria` (columna K): texto libre, sin lista desplegable por ahora. Se crea y se completa con `scripts/asignar_categoria.py` (ver sección propia).
 
 Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos una celda no vacía, a partir de la fila 2):

@@ -295,8 +295,10 @@ def agregar_registro(xml, filas_reg):
     return xml, ultima + 1, hasta
 
 
-def construir(archivo, salida, z, planes, filas_reg, partes):
-    modificadas = {}
+def construir(archivo, salida, z, planes, filas_reg, partes, extra=None):
+    """extra: {parte: bytes} con otras partes ya transformadas por el
+    llamador (por ejemplo validaciones de una hoja o workbook.xml)."""
+    modificadas = dict(extra or {})
     for p in planes:
         modificadas[p["parte_tabla"]] = transformar_tabla(
             z.read(p["parte_tabla"]).decode("utf-8"), p).encode("utf-8")
@@ -409,6 +411,11 @@ $res = @{ ok = $false }
 try {
   $wb = $x.Workbooks.Open($Ruta, 0, $true)
   $tablas = @()
+  $validaciones = @{}
+  foreach ($ws in $wb.Worksheets) {
+    try { $validaciones[$ws.Name] = $ws.Cells.SpecialCells(-4174).Address($false, $false) } catch { $validaciones[$ws.Name] = "" }
+  }
+  $nombres = @(); foreach ($n in $wb.Names) { $nombres += $n.Name }
   foreach ($ws in $wb.Worksheets) {
     foreach ($lo in $ws.ListObjects) {
       $cols = @(); foreach ($c in $lo.ListColumns) { $cols += $c.Name }
@@ -434,7 +441,7 @@ try {
     }
   }
   $wb.Close($false)
-  $res = @{ ok = $true; tablas = $tablas }
+  $res = @{ ok = $true; tablas = $tablas; validaciones = $validaciones; nombres = $nombres }
 } catch {
   $res = @{ ok = $false; error = "$_" }
 } finally {
