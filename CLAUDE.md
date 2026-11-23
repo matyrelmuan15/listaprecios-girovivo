@@ -27,6 +27,7 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
    1. Inspección (sin escribir nada).
    2. Dry-run / simulación con resumen (sin escribir nada).
    3. Ejecución real — solo tras aprobación explícita del usuario.
+10. **Toda columna que se agregue a una hoja de destino tiene que quedar dentro de la tabla de esa hoja** (ver "Columnas dentro de las tablas").
 
 ## Columna ActualizadoSegun y hoja NoActualizados
 - `ActualizadoSegun` (última columna de cada hoja de destino, con lista desplegable) guarda la **última** forma en que se actualizó el precio: `Lista proveedor` (la escribe Tipo 1), `Dólar` (la escribe Tipo 4) o `Manual` (la carga el usuario a mano). Tipo 2 y Tipo 3 no la tocan. Se escribe y registra solo si el valor cambia.
@@ -34,10 +35,15 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 - Cada `NOTAS.md` declara en `## Parámetros` la línea `marcas:` (valores de la columna `Marca` que trae ese proveedor, separados por coma).
 - `NoActualizados`: se regenera en cada ejecución real de Tipo 1 con las filas del Excel de esas marcas que no recibieron precio, con su motivo. Nunca incluye códigos de Hoja1. Es hoja de informe (como la columna E de Hoja1): no se registra en `RegistroCambios`, tiene los encabezados en la fila 4 y todos los scripts la excluyen por nombre.
 
+## Columnas dentro de las tablas
+- **Toda columna que se agregue a una hoja de destino tiene que quedar dentro de la tabla (`Table_N`) de esa hoja.** Si queda afuera, al ordenar en Excel sus valores no se mueven con las filas, y no toma el estilo del encabezado (en Bicicletas MTB queda blanco sobre blanco).
+- Las columnas se agregan siempre al final (nunca en el medio) y la tabla se amplía editando su XML con `scripts/tablas_xml.py` (no con openpyxl). Cada tabla ampliada se registra como `Estructura` (`Columna` = `Tabla <nombre>`, ref anterior → nueva).
+- `scripts/ampliar_tablas.py` amplía las tablas que hayan quedado angostas y quita los filtros guardados (flujo de 3 fases, con verificación byte a byte de Marcas y apertura en Excel). Desde el 23/11/2026 todas las tablas incluyen `ActualizadoSegun` (y `Categoria` donde existe).
+
 ## Columna Categoria
-- Columna de texto libre (sin lista desplegable por ahora) que se crea y completa con `scripts/asignar_categoria.py --filtro "<fragmento de hoja>" --valor "<Categoría>"` (dry-run por defecto; `--execute` para escribir; `--sobrescribir` para pisar otra categoría).
-- Se agrega en la primera columna libre al final (nunca en el medio) y queda fuera de las tablas `Table_N`. Fila de producto = `CodigoDux` no vacío.
-- Registro: encabezado nuevo → `TipoOperacion` `Estructura`; cada valor → `TipoOperacion` `Categoria` (una fila por celda).
+- Columna de texto libre (sin lista desplegable por ahora) que se crea y completa con `scripts/asignar_categoria.py --filtro "<fragmento de hoja>" --valor "<Categoría>"` (dry-run por defecto, que arma y verifica el resultado en una carpeta temporal; `--execute` para escribir; `--sobrescribir` para pisar otra categoría; `--archivo` para probar sobre una copia).
+- Se agrega en la primera columna libre al final y el mismo script amplía la tabla de la hoja para incluirla. Si ya está dentro y completa, no cambia nada. Fila de producto = `CodigoDux` no vacío.
+- Registro: encabezado nuevo → `Estructura`; cada valor → `Categoria` (una fila por celda); cada tabla ampliada → `Estructura`. Conteo: filas de registro = celdas modificadas + tablas ampliadas.
 - Aplicada el 23/11/2026 a las 5 hojas de bicicletas (columna K, valor `Bicicletas`). Las demás hojas, pendientes.
 
 ## Fórmulas obligatorias
@@ -84,7 +90,9 @@ ListaPreciosGiroVivo/
     ├── registro.py             (formato único de RegistroCambios, compartido)
     ├── actualizado_segun.py    (columna ActualizadoSegun y hoja NoActualizados, compartido)
     ├── crear_columna_actualizado.py (uso único: crea la columna ActualizadoSegun)
-    ├── asignar_categoria.py    (crea/completa la columna Categoria en las hojas filtradas; registra "Estructura" y "Categoria")
+    ├── asignar_categoria.py    (crea/completa la columna Categoria en las hojas filtradas y amplía su tabla; registra "Estructura" y "Categoria")
+    ├── ampliar_tablas.py       (amplía las tablas hasta el último encabezado y quita filtros guardados, editando el XML)
+    ├── tablas_xml.py           (ampliación de tablas por XML + verificaciones openpyxl / byte a byte / Excel, compartido)
     ├── formulas.py             (verificación de fórmulas Contado/SinIVA, compartido)
     ├── dolar.py                (regla única de validación del valor de dólar, compartido)
     ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro + control de capacidad de Marcas, solo lectura)

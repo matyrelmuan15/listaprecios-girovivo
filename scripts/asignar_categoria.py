@@ -5,12 +5,14 @@ asignar_categoria.py
 ---------------------
 Asigna un texto fijo en la columna "Categoria" de las hojas de destino cuyo
 nombre contenga alguno de los filtros indicados (sin importar mayúsculas ni
-acentos).
+acentos), y deja esa columna DENTRO de la tabla de Excel de la hoja.
 
     python asignar_categoria.py --filtro "bicicleta" --valor "Bicicletas"
-        -> inspección + dry-run (no escribe nada)
+        -> inspección + dry-run (arma y verifica el resultado en una carpeta
+           temporal; no toca el archivo real)
     python asignar_categoria.py --filtro "bicicleta" --valor "Bicicletas" --execute
-        -> backup + cambios reales
+        -> lo mismo + backup + reemplazo del archivo real
+    --archivo RUTA  -> procesa otro libro (por ejemplo, una copia de prueba)
 
 Reglas:
   - Si la hoja no tiene "Categoria", se crea el encabezado en la primera
@@ -18,29 +20,45 @@ Reglas:
     columnas en el medio), copiando el formato y el ancho del encabezado
     vecino.
   - Si la hoja ya tiene "Categoria", se usa esa columna.
+  - Regla del proyecto: toda columna de una hoja de destino queda dentro de
+    la tabla. Si "Categoria" queda fuera de la tabla de la hoja (porque se
+    acaba de crear o porque ya estaba afuera), la tabla se amplía. Si ya está
+    dentro y todas las filas tienen el valor, no cambia nada.
   - Fila de producto = fila con CodigoDux no vacío.
-  - Celdas que ya tienen el valor pedido: se saltean (correrlo dos veces no
-    cambia nada). Celdas con OTRA categoría: no se pisan salvo con
-    --sobrescribir; se informan.
+  - Celdas que ya tienen el valor pedido: se saltean. Celdas con OTRA
+    categoría: no se pisan salvo con --sobrescribir; se informan.
   - Valores fijos (texto), nunca fórmulas. Sin lista desplegable.
-  - Registro en RegistroCambios, una fila por celda modificada:
-    encabezado nuevo -> TipoOperacion "Estructura" (Columna = letra);
-    valor de categoría -> TipoOperacion "Categoria" (Columna = "Categoria").
+  - Los filtros guardados de las tablas no se tocan (eso es ampliar_tablas.py).
+
+Cómo se arma el resultado (siempre en una carpeta temporal):
+  1. openpyxl escribe encabezado y valores, y registra en RegistroCambios
+     "Estructura" (encabezado, Columna = letra) y "Categoria" (cada valor,
+     Columna = "Categoria"). Se guarda una copia intermedia.
+  2. Sobre esa copia, tablas_xml amplía por XML solo las tablas de las hojas
+     filtradas y registra una fila "Estructura" por tabla ampliada
+     (Columna "Tabla <nombre>", ref anterior -> nueva).
+  3. Verificaciones: openpyxl (refs, columnas, valores, registro y que las
+     demás hojas no cambien respecto del original), byte a byte contra la
+     copia intermedia (Marcas incluida) y apertura en Excel.
+  El conteo verifica: filas de registro = celdas modificadas + tablas ampliadas.
 """
 
 import argparse
 import shutil
 import sys
+import tempfile
 import unicodedata
+import zipfile
 from copy import copy
 from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, range_boundaries
 
 import actualizado_segun as act
 import registro
+import tablas_xml as tx
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -97,6 +115,15 @@ def backup_archivo(archivo):
     return destino
 
 
+def tabla_de_hoja(ws):
+    """(tabla, c1, r1, c2, r2) de la tabla que empieza en la fila 1, o None."""
+    for t in ws.tables.values():
+        c1, r1, c2, r2 = range_boundaries(t.ref)
+        if r1 == 1:
+            return t, c1, r1, c2, r2
+    return None
+
+
 # --------------------------------------------------------------------------
 # Planificación (no escribe nada)
 # --------------------------------------------------------------------------
@@ -131,15 +158,25 @@ def planificar_hoja(ws, valor, sobrescribir):
             "marca": ws.cell(row=r, column=c_marca).value if c_marca else None,
         })
 
+    # Tabla de la hoja: ¿Categoria queda adentro?
+    info = tabla_de_hoja(ws)
+    tabla = ref_nueva = None
+    if info:
+        t, c1, r1, c2, r2 = info
+        tabla = t.name
+        if col > c2:
+            ref_nueva = f"{get_column_letter(c1)}{r1}:{get_column_letter(col)}{r2}"
+
     return {
         "ws": ws, "col": col, "crear": crear, "a_escribir": a_escribir,
         "ya_ok": ya_ok, "distintas": distintas,
         "ocupadas_sin_dux": ocupadas_sin_dux,
+        "tabla": tabla, "ref": info[0].ref if info else None, "ref_nueva": ref_nueva,
     }
 
 
 # --------------------------------------------------------------------------
-# Escritura
+# Escritura (siempre sobre el libro en memoria; se guarda en una copia)
 # --------------------------------------------------------------------------
 def crear_encabezado(ws, col):
     nueva = ws.cell(row=1, column=col)
@@ -161,24 +198,39 @@ def escribir_valor(ws, fila, col, valor, copiar_estilo):
             celda._style = copy(vecina._style)
 
 
+def comparar_con_original(wb_orig, salida, hojas_cambiadas):
+    """Las hojas que no se procesan (Marcas incluida) deben quedar con los
+    mismos valores y fórmulas que en el archivo original."""
+    wb = openpyxl.load_workbook(salida)
+    errores = []
+    for ws in wb_orig.worksheets:
+        if ws.title in hojas_cambiadas or ws.title == registro.HOJA_REGISTRO:
+            continue
+        a = [tuple(map(tx.valor_comparable, f)) for f in ws.iter_rows(values_only=True)]
+        b = [tuple(map(tx.valor_comparable, f)) for f in wb[ws.title].iter_rows(values_only=True)]
+        if a != b:
+            errores.append(f"{ws.title}: cambiaron valores respecto del original")
+    return not errores, errores
+
+
 # --------------------------------------------------------------------------
 # Proceso principal
 # --------------------------------------------------------------------------
 def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
+    archivo = Path(archivo)
     if not archivo.exists():
-        sys.exit(f"ERROR: no se encontró el archivo de trabajo en: {archivo}")
+        raise tx.Abortar(f"no se encontró el archivo de trabajo en: {archivo}")
     valor = valor.strip()
     if not valor:
-        sys.exit("ERROR: --valor no puede estar vacío.")
+        raise tx.Abortar("--valor no puede estar vacío.")
     filtros = [normalizar(f) for f in filtros if normalizar(f)]
     if not filtros:
-        sys.exit("ERROR: indicá al menos un --filtro no vacío.")
+        raise tx.Abortar("indicá al menos un --filtro no vacío.")
 
-    wb = openpyxl.load_workbook(archivo)  # sin data_only=True
-    try:
-        registro.validar_encabezados(wb)
-    except registro.RegistroError as e:
-        sys.exit(f"\nERROR: {e}")
+    sha_origen = tx.sha(archivo.read_bytes())
+    wb_orig = openpyxl.load_workbook(archivo)  # referencia para comparar; nunca se guarda
+    wb = openpyxl.load_workbook(archivo)       # sin data_only=True; se guarda solo en una copia
+    registro.validar_encabezados(wb)
 
     # ---------------- Fase 1: inspección ----------------
     planes, sin_esquema = [], []
@@ -191,8 +243,9 @@ def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
             continue
         planes.append(planificar_hoja(ws, valor, sobrescribir))
 
-    modo = "EJECUCIÓN" if execute else "DRY-RUN (sin escribir cambios)"
+    modo = "EJECUCIÓN" if execute else "DRY-RUN (no se modifica el archivo real)"
     print(f"\n=== Asignar Categoria | Modo: {modo} ===")
+    print(f"Archivo: {archivo}")
     print(f"Filtro de hojas: {', '.join(filtros)} | Valor: '{valor}'"
           f" | Sobrescribir otras categorías: {'sí' if sobrescribir else 'no'}\n")
 
@@ -206,7 +259,13 @@ def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
             donde = f"columna {letra} (nueva, después de '{vecino}')"
         else:
             donde = f"columna {letra} (ya existe)"
-        print(f"  - {ws.title}: {donde} | filas a marcar: {len(p['a_escribir'])}"
+        if p["tabla"] is None:
+            tabla = "sin tabla de Excel"
+        elif p["ref_nueva"]:
+            tabla = f"tabla {p['tabla']} {p['ref']} -> {p['ref_nueva']}"
+        else:
+            tabla = f"tabla {p['tabla']} {p['ref']} (ya la incluye)"
+        print(f"  - {ws.title}: {donde} | {tabla} | filas a marcar: {len(p['a_escribir'])}"
               f" | ya con '{valor}': {p['ya_ok']}"
               f" | con otra categoría (no se tocan): {len(p['distintas'])}")
         for r, v in p["distintas"][:5]:
@@ -214,17 +273,18 @@ def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
         if p["ocupadas_sin_dux"]:
             print(f"      Aviso: {len(p['ocupadas_sin_dux'])} celda(s) de Categoria con "
                   f"valor en filas sin CodigoDux (no se tocan).")
+        if p["tabla"] is None:
+            print("      Aviso: la hoja no tiene tabla de Excel; no hay nada que ampliar.")
     if sin_esquema:
         print(f"  Hojas que coinciden pero no son de destino (se ignoran): "
               f"{', '.join(sin_esquema)}")
 
-    # ---------------- Fase 2: dry-run / resumen ----------------
+    # ---------------- Fase 2: registro de celdas ----------------
     corrida_enc = registro.RegistroCorrida(
         registro.TIPO_ESTRUCTURA, f"Nueva columna {COL_CATEGORIA}")
     corrida_val = registro.RegistroCorrida(
         registro.TIPO_CATEGORIA, f"Asignación de categoría '{valor}'",
         fecha=corrida_enc.fecha)
-
     for p in planes:
         ws, letra = p["ws"], get_column_letter(p["col"])
         if p["crear"]:
@@ -237,53 +297,134 @@ def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
                                 columna=COL_CATEGORIA, valor_anterior=f["anterior"],
                                 valor_nuevo=valor)
 
-    n_enc, n_val = len(corrida_enc), len(corrida_val)
-    total = n_enc + n_val
+    a_ampliar = [p for p in planes if p["ref_nueva"]]
+    n_enc, n_val, n_tab = len(corrida_enc), len(corrida_val), len(a_ampliar)
+    total = n_enc + n_val + n_tab
     print("\n--- Fase 2: Resumen ---")
     print(f"  Hojas procesadas: {len(planes)}")
     print(f"  Encabezados nuevos (TipoOperacion '{registro.TIPO_ESTRUCTURA}'): {n_enc}")
     print(f"  Celdas de categoría (TipoOperacion '{registro.TIPO_CATEGORIA}'): {n_val}")
-    print(f"  Total de celdas a modificar = filas de RegistroCambios: {total}")
+    print(f"  Tablas ampliadas (TipoOperacion '{registro.TIPO_ESTRUCTURA}'): {n_tab}")
+    print(f"  Total de cambios = filas de RegistroCambios: {total}")
 
     if total == 0:
         print("\nNo hay nada para cambiar.")
         return 0
 
-    if not execute:
-        registro.imprimir_previsualizacion(corrida_enc)
-        registro.imprimir_previsualizacion(corrida_val)
-        print("\nEsto fue una simulación (dry-run). No se modificó el archivo "
-              "ni se creó backup.")
-        return total
-
-    # ---------------- Fase 3: ejecución ----------------
-    modificadas = 0
+    # Etapa 1 (openpyxl): celdas + registro de celdas -> copia intermedia
+    modificadas_celdas = 0
     for p in planes:
         ws, col = p["ws"], p["col"]
         if p["crear"]:
             crear_encabezado(ws, col)
-            modificadas += 1
+            modificadas_celdas += 1
         for f in p["a_escribir"]:
             escribir_valor(ws, f["fila"], col, valor, copiar_estilo=p["crear"])
-            modificadas += 1
-
+            modificadas_celdas += 1
     corrida_enc.filas.extend(corrida_val.filas)
-    try:
-        corrida_enc.verificar_conteo(modificadas)
-        corrida_enc.escribir(wb)
-    except registro.RegistroError as e:
-        sys.exit(f"\n{e}")
+    corrida_enc.verificar_conteo(modificadas_celdas)
+    corrida_enc.escribir(wb)
 
+    carpeta = Path(tempfile.mkdtemp(prefix="asignar_categoria_"))
+    intermedio = carpeta / "intermedio.xlsx"
+    wb.save(intermedio)
+
+    # Etapa 2 (XML): ampliar tablas de las hojas procesadas
+    z = zipfile.ZipFile(intermedio)
+    partes = tx.mapa_partes(z)
+    hojas_proc = {p["ws"].title for p in planes}
+    wb_int, planes_t, avisos = tx.analizar(intermedio, z, partes, hojas=hojas_proc,
+                                           quitar_filtros=False)
+    esperadas = {p["tabla"]: p["ref_nueva"] for p in a_ampliar}
+    obtenidas = {t["tabla"]: t["ref_nueva"] for t in planes_t}
+    if esperadas != obtenidas:
+        raise tx.Abortar(f"la ampliación de tablas no coincide con lo previsto: "
+                         f"esperado {esperadas}, calculado {obtenidas}")
+    filas_tab = [registro.nueva_fila(
+        corrida_enc.fecha, registro.TIPO_ESTRUCTURA, t["hoja"], 1, None, None,
+        f"Tabla {t['tabla']}", t["ref"], t["ref_nueva"],
+        "Ampliación de tabla: se incorporan " + ", ".join(n for _, n in t["nuevas"]))
+        for t in planes_t]
+    registro.verificar_conteo(corrida_enc.filas + filas_tab, modificadas_celdas + len(planes_t))
+
+    salida = carpeta / archivo.name
+    modificadas, desde, hasta = tx.construir(intermedio, salida, z, planes_t, filas_tab, partes)
+    print(f"\nResultado simulado: {salida}")
+
+    print(f"\n--- Vista previa de '{registro.HOJA_REGISTRO}' ---")
+    todas = corrida_enc.filas + filas_tab
+    muestra = corrida_enc.filas[:n_enc] + corrida_val.filas[:3] + filas_tab
+    for fila in muestra:
+        print("    - " + " | ".join("(vacío)" if fila[h] is None else str(fila[h])
+                                    for h in registro.REGISTRO_HEADERS))
+    if len(todas) > len(muestra):
+        print(f"    ... y {len(todas) - len(muestra)} filas más ({len(todas)} en total).")
+
+    # ---------------- Verificaciones ----------------
+    print("\n--- Verificación 1: openpyxl ---")
+    ok1, err1 = tx.verificar_openpyxl(wb_int, salida, planes_t, filas_tab, desde,
+                                      hojas=hojas_proc, exigir_sin_filtros=False)
+    ok1b, err1b = comparar_con_original(wb_orig, salida, hojas_proc)
+    filas_reg_total = hasta - (wb_orig[registro.HOJA_REGISTRO].max_row)
+    ok1c = filas_reg_total == total
+    print(f"  Tablas, columnas, valores y registro: {'OK' if ok1 else 'ERROR'}")
+    print(f"  Hojas no procesadas (Marcas incluida) iguales al original: {'OK' if ok1b else 'ERROR'}")
+    print(f"  Filas nuevas en RegistroCambios: {filas_reg_total} (esperadas {total}): "
+          f"{'OK' if ok1c else 'ERROR'}")
+    for e in err1 + err1b:
+        print(f"  ERROR: {e}")
+
+    print("\n--- Verificación 2: byte a byte (etapa XML contra la copia intermedia) ---")
+    ok2, det2 = tx.verificar_bytes(z, salida, modificadas, partes)
+    print(f"  {'OK' if ok2 else 'ERROR'} | {det2}")
+
+    print("\n--- Verificación 3: Excel ---")
+    res = tx.abrir_en_excel(salida, carpeta)
+    ok3, lin = tx.evaluar_excel(res, planes_t, exigir_sin_filtros=False)
+    print("  Excel lo abrió sin pedido de reparación." if res.get("ok")
+          else "  Excel NO pudo abrirlo.")
+    nombres = {t["tabla"] for t in planes_t} | {p["tabla"] for p in planes if p["tabla"]}
+    mostrar_sig = False
+    for linea in lin:
+        if linea.startswith("  ERROR"):
+            print(linea)
+        elif "encabezados:" in linea:
+            if mostrar_sig:
+                print(linea)
+        else:
+            mostrar_sig = any(f" {n} " in linea for n in nombres)
+            if mostrar_sig:
+                print(linea)
+    print(f"  {'OK' if ok3 else 'ERROR'}")
+
+    z.close()
+    if not (ok1 and ok1b and ok1c and ok2 and ok3):
+        raise tx.Abortar("alguna verificación falló; no se toca el archivo real.")
+
+    if not execute:
+        print("\nEsto fue una simulación (dry-run). No se modificó el archivo real ni se creó backup.")
+        return total
+
+    # ---------------- Fase 3: ejecución ----------------
+    if tx.sha(archivo.read_bytes()) != sha_origen:
+        raise tx.Abortar("el archivo real cambió durante la corrida; volvé a correr el script.")
     backup = backup_archivo(archivo)
     print(f"\nBackup creado en: {backup}")
-    wb.save(archivo)
-    print(f"Archivo guardado: {archivo}")
-    print(f"Celdas modificadas: {modificadas} | Filas agregadas a "
-          f"{registro.HOJA_REGISTRO}: {len(corrida_enc)}")
-    return modificadas
+    try:
+        shutil.copyfile(salida, archivo)
+    except PermissionError:
+        raise tx.Abortar("no se pudo reemplazar el archivo porque está abierto en Excel. "
+                         "Cerralo y volvé a correr el script. El archivo real no se modificó.")
+    if tx.sha(archivo.read_bytes()) != tx.sha(salida.read_bytes()):
+        raise tx.Abortar(f"el archivo guardado no coincide con el verificado. Restaurá el backup: {backup}")
+    print(f"Archivo reemplazado: {archivo}")
+    print(f"Celdas modificadas: {modificadas_celdas} | Tablas ampliadas: {len(planes_t)} | "
+          f"Filas agregadas a {registro.HOJA_REGISTRO}: {total}")
+    return total
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
     p = argparse.ArgumentParser(
         description="Asigna un valor fijo en la columna Categoria de las hojas filtradas.")
     p.add_argument("--filtro", action="append", required=True,
@@ -293,8 +434,13 @@ def main():
     p.add_argument("--sobrescribir", action="store_true",
                    help="Reemplaza celdas que ya tienen otra categoría.")
     p.add_argument("--execute", action="store_true", help="Aplica los cambios reales.")
+    p.add_argument("--archivo", type=Path, default=ARCHIVO_PATH,
+                   help="Libro a procesar (por defecto, el archivo real).")
     args = p.parse_args()
-    procesar(args.filtro, args.valor, args.execute, args.sobrescribir)
+    try:
+        procesar(args.filtro, args.valor, args.execute, args.sobrescribir, args.archivo)
+    except (tx.Abortar, registro.RegistroError) as e:
+        sys.exit(f"\nABORTADO: {e}")
 
 
 if __name__ == "__main__":

@@ -34,7 +34,11 @@ Las 11 hojas de destino (Bicicletas MTB, Bicicletas Ruta, Bicicletas Gravel, Bic
 
 y, solo en las hojas donde ya se asignó categoría, `Categoria` a continuación (ver más abajo).
 
-- Las tablas de Excel `Table_1` … `Table_11` cubren solo de `FechaActualizacion` a `DolarReferencia` (A:I). `ActualizadoSegun` y `Categoria` quedan **fuera** de las tablas, a propósito: las tablas alimentan las fórmulas de `Marcas Actualización Dinámica` y no se amplían.
+- Cada hoja tiene una tabla de Excel que cubre **todas** sus columnas, `ActualizadoSegun` y `Categoria` incluidas: A:K en las 5 hojas de bicicletas y A:J en las demás (ampliadas el 23/11/2026 con `scripts/ampliar_tablas.py`). Así esas columnas se ordenan y filtran junto con sus filas y toman el estilo de encabezado de la tabla. **Regla:** toda columna nueva de una hoja de destino tiene que quedar dentro de su tabla.
+- Nombre de la tabla por hoja: Bicicletas MTB `Table_1`, Ruta `Table_2`, Gravel `Table_3`, Paseo `Table_4`, BMX-Infantiles `Table_5`, Accesorios `Table_6`, Indumentaria `Table_7`, Computadoras `Table_8`, Cuadros `Table_9`, Nutricional `Table_10`, Repuestos `Table_11`.
+- Las fórmulas de `Marcas Actualización Dinámica` usan las tablas solo por nombre de columna (`Table_N[NombreProducto]`, `[Marca]`, `[FechaActualizacion]`), así que ampliarlas hacia la derecha no las afecta.
+- Gravel, Cuadros y Nutricional no tienen botones de filtro en el encabezado (las demás sí). No hay filtros guardados activos desde el 23/11/2026.
+- En Bicicletas MTB el fondo azul de los encabezados lo da el **estilo de la tabla** (las celdas tienen letra blanca sin fondo propio); en las demás hojas lo tiene cada celda. Por eso una columna fuera de la tabla en MTB se ve blanco sobre blanco.
 - `ActualizadoSegun` (columna J): lista desplegable `Manual` / `Dólar` / `Lista proveedor` en J2:J5000. Creada una sola vez con `scripts/crear_columna_actualizado.py`.
 - `Categoria` (columna K): texto libre, sin lista desplegable por ahora. Se crea y se completa con `scripts/asignar_categoria.py` (ver sección propia).
 
@@ -68,10 +72,19 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 - Aplicada el 23/11/2026 a las 5 hojas de bicicletas (`--filtro "bicicleta" --valor "Bicicletas"`): columna **K** en Bicicletas MTB (128 filas), Ruta (41), Gravel (11), Paseo (12) y BMX-Infantiles (46). En total, 5 encabezados + 238 valores = 243 celdas y 243 filas de `RegistroCambios`. Backup previo: `backup/Lista de Precios Giro Vivo 2026_20261123_113302.xlsx`.
 - Las demás hojas todavía no tienen la columna.
 - Uso (desde `scripts/`):
-  - `python asignar_categoria.py --filtro "<fragmento>" --valor "<Categoría>"` → inspección + dry-run (no escribe).
-  - Mismo comando con `--execute` → backup + escritura.
-  - `--filtro` se puede repetir y compara contra el nombre de la hoja sin importar mayúsculas ni acentos. `--sobrescribir` reemplaza celdas que ya tienen **otra** categoría (por defecto no se tocan y se informan).
+  - `python asignar_categoria.py --filtro "<fragmento>" --valor "<Categoría>"` → inspección + dry-run: arma el resultado completo en una carpeta temporal y lo verifica, sin tocar el archivo real.
+  - Mismo comando con `--execute` → lo mismo + backup con timestamp + reemplazo del archivo real.
+  - `--filtro` se puede repetir y compara contra el nombre de la hoja sin importar mayúsculas ni acentos. `--sobrescribir` reemplaza celdas que ya tienen **otra** categoría (por defecto no se tocan y se informan). `--archivo RUTA` procesa otro libro (para pruebas sobre copias).
 - Si la hoja no tiene `Categoria`, se crea en la primera columna libre a la derecha del último encabezado, copiando el formato y el ancho del encabezado vecino. Si ya existe, se usa esa.
+- Si `Categoria` queda fuera de la tabla de la hoja (recién creada o ya existente), el script **amplía la tabla** editando su XML (módulo compartido `scripts/tablas_xml.py`). Si ya está dentro y todas las filas tienen el valor, no cambia nada. No toca filtros guardados.
+- Registro: encabezado nuevo → `Estructura` (Columna = letra); cada valor → `Categoria`; cada tabla ampliada → `Estructura` (Columna = `Tabla <nombre>`, ref anterior → nueva). El conteo exige filas de registro = celdas modificadas + tablas ampliadas.
+- Verificaciones antes de tocar el archivo real: openpyxl (refs, columnas = encabezados, ningún encabezado fuera de la tabla en las hojas procesadas, hojas no procesadas iguales al original, registro), byte a byte (la etapa XML no altera Marcas ni otras partes) y apertura en Excel sin pedido de reparación, con los encabezados nuevos visibles e iguales al anterior.
+
+### Ampliación de tablas y filtros guardados (`scripts/ampliar_tablas.py`)
+- Amplía cada `Table_N` hasta el último encabezado de su hoja y quita los criterios de filtro guardados, volviendo a mostrar las filas que ocultaban. No agrega ni quita botones de filtro. Edita solo el XML (tablas, atributo `hidden` de esas filas y `RegistroCambios`); el resto del libro se copia byte a byte. La lógica vive en `scripts/tablas_xml.py`.
+- Uso (desde `scripts/`): `python ampliar_tablas.py` (dry-run con las tres verificaciones, incluida la apertura en Excel), `--execute` (backup + reemplazo), `--archivo RUTA` (otro libro).
+- Registro: una fila `Estructura` por tabla ampliada (`Tabla <nombre>`) y una por filtro quitado (`Filtro <tabla> [<columna>]`, criterio anterior → `(sin filtro)`).
+- Aplicado el 23/11/2026: 11 tablas ampliadas, 2 filtros quitados (Indumentaria `Marca = PAVE`, 150 filas vuelven a verse; Repuestos `FechaActualizacion <> " "`), 13 filas de registro (9396–9408). Backup previo: `backup/Lista de Precios Giro Vivo 2026_20261123_121649.xlsx`. Hoy no encuentra nada para cambiar.
 - Fila de producto = fila con `CodigoDux` no vacío. Las celdas que ya tienen el valor pedido se saltean, así que correrlo dos veces no cambia nada.
 - Siempre excluye Hoja1, Marcas Actualización Dinámica, RegistroCambios, NoActualizados y Venzo Sin Actualizar, y solo procesa hojas con `CodigoDux` y `PrecioConIVA` en la fila 1.
 
@@ -131,7 +144,7 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 
 **RegistroCambios (formato único, definido en `scripts/registro.py`):**
 - `Fecha`
-- `TipoOperacion` (`Precios`, `Dolar`, `PrecioDolar`, `Fecha`, `Formulas`, `Estructura`, `Eliminacion`, `Categoria`; `Eliminacion` lo usa `scripts/eliminar_filas_sin_fecha.py`, con una fila por fila eliminada y `Columna` = `Fila completa`; `Estructura` registra encabezados nuevos, con `Columna` = letra; `Categoria` lo usa `scripts/asignar_categoria.py`, una fila por celda, con `Columna` = `Categoria`)
+- `TipoOperacion` (`Precios`, `Dolar`, `PrecioDolar`, `Fecha`, `Formulas`, `Estructura`, `Eliminacion`, `Categoria`; `Eliminacion` lo usa `scripts/eliminar_filas_sin_fecha.py`, con una fila por fila eliminada y `Columna` = `Fila completa`; `Estructura` registra encabezados nuevos (`Columna` = letra), tablas ampliadas (`Columna` = `Tabla <nombre>`, ref anterior → nueva) y filtros quitados (`Columna` = `Filtro <tabla> [<columna>]`); `Categoria` lo usa `scripts/asignar_categoria.py`, una fila por celda, con `Columna` = `Categoria`)
 - `Hoja`
 - `Fila`
 - `NombreProducto`
