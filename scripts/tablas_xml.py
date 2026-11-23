@@ -445,14 +445,39 @@ $res | ConvertTo-Json -Depth 6 -Compress
 """
 
 
+def _esperar_fin_proceso(pid, segundos=60):
+    """Espera a que termine el proceso de Excel que abrió esta verificación
+    (solo ese PID; nunca toca otros Excel abiertos). Si no termina, lo cierra."""
+    import time
+    fin = time.time() + segundos
+    while time.time() < fin:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if str(pid) not in r.stdout.decode("utf-8", errors="replace"):
+            return
+        time.sleep(1)
+    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
 def abrir_en_excel(ruta, carpeta):
     """Abre el libro en Excel (solo lectura, oculto). Si Excel pide reparar,
-    el diálogo bloquea la apertura y se corta por timeout."""
+    el diálogo bloquea la apertura y se corta por timeout. Al terminar espera
+    a que ese proceso de Excel se cierre, para que la próxima apertura no se
+    cruce con él. `infra` = True marca fallas de infraestructura (se pueden
+    reintentar); un timeout NO lo es (puede ser un pedido de reparación)."""
     ps = Path(carpeta) / "verificar_excel.ps1"
     ps.write_text(PS_EXCEL, encoding="utf-8-sig")
     pid_file = Path(carpeta) / "excel.pid"
     if pid_file.exists():
         pid_file.unlink()
+
+    def pid_excel():
+        try:
+            return int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
     try:
         r = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps),
@@ -460,17 +485,40 @@ def abrir_en_excel(ruta, carpeta):
             capture_output=True, timeout=TIMEOUT_EXCEL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired:
-        if pid_file.exists():
-            pid = pid_file.read_text().strip()
-            subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
-        return {"ok": False, "error": f"Excel no terminó de abrir en {TIMEOUT_EXCEL} s "
-                                      "(posible pedido de reparación)."}
+        pid = pid_excel()
+        if pid:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        return {"ok": False, "infra": False,
+                "error": f"Excel no terminó de abrir en {TIMEOUT_EXCEL} s "
+                         "(posible pedido de reparación)."}
+    pid = pid_excel()
+    if pid:
+        _esperar_fin_proceso(pid)
     salida = r.stdout.decode("utf-8", errors="replace").strip()
     try:
-        return json.loads(salida.splitlines()[-1])
+        res = json.loads(salida.splitlines()[-1])
     except (ValueError, IndexError):
-        return {"ok": False, "error": "Respuesta inesperada de Excel: "
+        return {"ok": False, "infra": True, "error": "Respuesta inesperada de Excel: "
                 + (salida or r.stderr.decode("utf-8", errors="replace"))[:500]}
+    res.setdefault("infra", not res.get("ok"))
+    return res
+
+
+def verificar_en_excel(ruta, carpeta, planes, intentos=3, **opciones):
+    """abrir_en_excel + evaluar_excel, con reintentos SOLO ante fallas de
+    infraestructura (Excel no respondió o no informó alguna tabla). Un error
+    de contenido (ref, columnas, filtros, formato) o un timeout no se
+    reintenta. Devuelve (ok, res, líneas, intentos_usados)."""
+    for i in range(1, intentos + 1):
+        res = abrir_en_excel(ruta, carpeta)
+        ok, lin = evaluar_excel(res, planes, **opciones)
+        if ok:
+            return ok, res, lin, i
+        infra = res.get("infra") if not res.get("ok") else all(
+            "Excel no informó las tablas" in l for l in lin if l.startswith("  ERROR"))
+        if not infra:
+            return ok, res, lin, i
+    return ok, res, lin, intentos
 
 
 def color_hex(bgr):
@@ -482,14 +530,15 @@ def color_hex(bgr):
     return f"#{v & 0xFF:02X}{(v >> 8) & 0xFF:02X}{(v >> 16) & 0xFF:02X}"
 
 
-def evaluar_excel(res, planes, antes=False, exigir_sin_filtros=True):
+def evaluar_excel(res, planes, antes=False, exigir_sin_filtros=True, requeridas=()):
     """Devuelve (ok, líneas de detalle).
 
     Para cada tabla ampliada compara el formato visible (fondo, letra y
     negrita) de los encabezados nuevos con el de la columna anterior, y marca
     como error cualquier encabezado con letra del mismo color que el fondo.
     exigir_sin_filtros=False admite filtros activos (cuando no se pidió
-    quitarlos)."""
+    quitarlos). Toda tabla del plan, y las de `requeridas`, tienen que
+    aparecer en la respuesta de Excel; si falta alguna, es un error."""
     if not res.get("ok"):
         return False, [f"Excel: {res.get('error')}"]
     por_tabla = {p["tabla"]: p for p in planes}
@@ -535,4 +584,9 @@ def evaluar_excel(res, planes, antes=False, exigir_sin_filtros=True):
             errores.append(f"{t['tabla']}: encabezados invisibles {invisibles}")
         if distintos:
             errores.append(f"{t['tabla']}: {distintos} no se ven igual que {letra_ref}1")
+    if not antes:
+        vistas = {t["tabla"] for t in tablas}
+        faltan = sorted(({p["tabla"] for p in planes} | set(requeridas)) - vistas)
+        if faltan:
+            errores.append(f"Excel no informó las tablas {faltan}")
     return not errores, lineas + [f"  ERROR: {e}" for e in errores]

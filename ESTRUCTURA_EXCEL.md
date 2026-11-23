@@ -32,7 +32,7 @@ Las 11 hojas de destino (Bicicletas MTB, Bicicletas Ruta, Bicicletas Gravel, Bic
 
 `FechaActualizacion`, `CodigoDux`, `NombreProducto`, `CodigoFactura`, `Marca`, `PrecioContado`, `PrecioSinIVA`, `PrecioConIVA`, `DolarReferencia`, `ActualizadoSegun`
 
-y, solo en las hojas donde ya se asignó categoría, `Categoria` a continuación (ver más abajo).
+y `Categoria` a continuación (columna K en las 11 hojas; ver más abajo).
 
 - Cada hoja tiene una tabla de Excel que cubre **todas** sus columnas, `ActualizadoSegun` y `Categoria` incluidas: A:K en las 5 hojas de bicicletas y A:J en las demás (ampliadas el 23/11/2026 con `scripts/ampliar_tablas.py`). Así esas columnas se ordenan y filtran junto con sus filas y toman el estilo de encabezado de la tabla. **Regla:** toda columna nueva de una hoja de destino tiene que quedar dentro de su tabla.
 - Nombre de la tabla por hoja: Bicicletas MTB `Table_1`, Ruta `Table_2`, Gravel `Table_3`, Paseo `Table_4`, BMX-Infantiles `Table_5`, Accesorios `Table_6`, Indumentaria `Table_7`, Computadoras `Table_8`, Cuadros `Table_9`, Nutricional `Table_10`, Repuestos `Table_11`.
@@ -70,11 +70,12 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 
 ### Columna Categoria (`scripts/asignar_categoria.py`)
 - Aplicada el 23/11/2026 a las 5 hojas de bicicletas (`--filtro "bicicleta" --valor "Bicicletas"`): columna **K** en Bicicletas MTB (128 filas), Ruta (41), Gravel (11), Paseo (12) y BMX-Infantiles (46). En total, 5 encabezados + 238 valores = 243 celdas y 243 filas de `RegistroCambios`. Backup previo: `backup/Lista de Precios Giro Vivo 2026_20261123_113302.xlsx`.
-- Las demás hojas todavía no tienen la columna.
+- Aplicada también el 23/11/2026 a las otras 6 hojas, cada una con su nombre como categoría (`--hoja "<Hoja>" --valor "<Hoja>"`), una corrida y un backup por hoja: Computadoras 16 filas, Cuadros 12, Repuestos 382, Nutricional 73, Accesorios 482 e Indumentaria 208. En total 6 encabezados + 1.173 valores + 6 tablas = 1.185 filas de `RegistroCambios` (9409–10593). Backups: `..._20261123_130316`, `_130352`, `_130427`, `_130504`, `_130541` y `_130618`.
+- Quedan sin categoría, por no tener `CodigoDux`, las filas 59 y 61 de Nutricional (caramañolas NX 500cc y 750cc); se corrigen a mano.
 - Uso (desde `scripts/`):
   - `python asignar_categoria.py --filtro "<fragmento>" --valor "<Categoría>"` → inspección + dry-run: arma el resultado completo en una carpeta temporal y lo verifica, sin tocar el archivo real.
   - Mismo comando con `--execute` → lo mismo + backup con timestamp + reemplazo del archivo real.
-  - `--filtro` se puede repetir y compara contra el nombre de la hoja sin importar mayúsculas ni acentos. `--sobrescribir` reemplaza celdas que ya tienen **otra** categoría (por defecto no se tocan y se informan). `--archivo RUTA` procesa otro libro (para pruebas sobre copias).
+  - `--filtro` se puede repetir y compara contra el nombre de la hoja sin importar mayúsculas ni acentos. `--sobrescribir` reemplaza celdas que ya tienen **otra** categoría (por defecto no se tocan y se informan). `--hoja "<nombre>"` (repetible) toma solo la hoja con ese nombre exacto, sin coincidencias parciales, y aborta si no existe. `--archivo RUTA` procesa otro libro (para pruebas sobre copias).
 - Si la hoja no tiene `Categoria`, se crea en la primera columna libre a la derecha del último encabezado, copiando el formato y el ancho del encabezado vecino. Si ya existe, se usa esa.
 - Si `Categoria` queda fuera de la tabla de la hoja (recién creada o ya existente), el script **amplía la tabla** editando su XML (módulo compartido `scripts/tablas_xml.py`). Si ya está dentro y todas las filas tienen el valor, no cambia nada. No toca filtros guardados.
 - Registro: encabezado nuevo → `Estructura` (Columna = letra); cada valor → `Categoria`; cada tabla ampliada → `Estructura` (Columna = `Tabla <nombre>`, ref anterior → nueva). El conteo exige filas de registro = celdas modificadas + tablas ampliadas.
@@ -136,7 +137,7 @@ Cantidad aproximada de filas con datos por hoja (conteo de filas con al menos un
 - `PrecioConIVA`
 - `DolarReferencia`
 - `ActualizadoSegun`
-- `Categoria` (por ahora solo en las 5 hojas de bicicletas)
+- `Categoria` (en las 11 hojas)
 
 **Hoja1 (staging):**
 - `CODIGO`

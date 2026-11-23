@@ -44,7 +44,7 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 - Columna de texto libre (sin lista desplegable por ahora) que se crea y completa con `scripts/asignar_categoria.py --filtro "<fragmento de hoja>" --valor "<Categoría>"` (dry-run por defecto, que arma y verifica el resultado en una carpeta temporal; `--execute` para escribir; `--sobrescribir` para pisar otra categoría; `--archivo` para probar sobre una copia).
 - Se agrega en la primera columna libre al final y el mismo script amplía la tabla de la hoja para incluirla. Si ya está dentro y completa, no cambia nada. Fila de producto = `CodigoDux` no vacío.
 - Registro: encabezado nuevo → `Estructura`; cada valor → `Categoria` (una fila por celda); cada tabla ampliada → `Estructura`. Conteo: filas de registro = celdas modificadas + tablas ampliadas.
-- Aplicada el 23/11/2026 a las 5 hojas de bicicletas (columna K, valor `Bicicletas`). Las demás hojas, pendientes.
+- Aplicada el 23/11/2026 a las 11 hojas de destino (columna K, dentro de cada tabla): las 5 de bicicletas con `Bicicletas` y cada una de las otras 6 con su propio nombre (`--hoja "<Hoja>" --valor "<Hoja>"`). Para tomar una sola hoja usar `--hoja` (nombre exacto), no `--filtro` (coincidencia parcial).
 
 ## Fórmulas obligatorias
 - `PrecioContado` = `='<Hoja>'!$H6-('<Hoja>'!$H6*15/100)` y `PrecioSinIVA` = `='<Hoja>'!$H6/1.21`, donde la letra sale del encabezado `PrecioConIVA`.

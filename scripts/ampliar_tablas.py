@@ -57,7 +57,7 @@ from openpyxl.utils import get_column_letter
 import registro
 from tablas_xml import (HOJA_MARCAS, Abortar, abrir_en_excel, analizar, construir,
                         evaluar_excel, mapa_partes, sha, verificar_bytes,
-                        verificar_openpyxl)
+                        verificar_en_excel, verificar_openpyxl)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -156,10 +156,10 @@ def procesar(execute, archivo=ARCHIVO_PATH):
     _, lin_antes = evaluar_excel(abrir_en_excel(copia_antes, carpeta), planes, antes=True)
     print("  Antes (archivo actual):")
     print("\n".join(lin_antes))
-    res_despues = abrir_en_excel(salida, carpeta)
-    ok3, lin = evaluar_excel(res_despues, planes)
-    print("  Después (libro simulado): Excel lo abrió sin pedido de reparación."
-          if res_despues.get("ok") else "  Después (libro simulado): Excel NO pudo abrirlo.")
+    ok3, res_despues, lin, intentos = verificar_en_excel(salida, carpeta, planes)
+    print(("  Después (libro simulado): Excel lo abrió sin pedido de reparación."
+           if res_despues.get("ok") else "  Después (libro simulado): Excel NO pudo abrirlo.")
+          + (f" (intentos: {intentos})" if intentos > 1 else ""))
     print("\n".join(lin))
     print(f"  {'OK' if ok3 else 'ERROR'}")
 

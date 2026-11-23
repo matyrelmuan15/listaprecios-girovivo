@@ -12,6 +12,8 @@ acentos), y deja esa columna DENTRO de la tabla de Excel de la hoja.
            temporal; no toca el archivo real)
     python asignar_categoria.py --filtro "bicicleta" --valor "Bicicletas" --execute
         -> lo mismo + backup + reemplazo del archivo real
+    python asignar_categoria.py --hoja "Cuadros" --valor "Cuadros"
+        -> solo la hoja con ese nombre exacto (sin coincidencias parciales)
     --archivo RUTA  -> procesa otro libro (por ejemplo, una copia de prueba)
 
 Reglas:
@@ -102,9 +104,11 @@ def mapa_encabezados(ws):
     return mapa
 
 
-def hoja_coincide(titulo, filtros):
+def hoja_coincide(titulo, filtros, exactas=()):
+    """--filtro: el fragmento aparece en el nombre. --hoja: el nombre es
+    exactamente ese (sin importar mayúsculas ni acentos)."""
     t = normalizar(titulo)
-    return any(f in t for f in filtros)
+    return any(f in t for f in filtros) or t in exactas
 
 
 def backup_archivo(archivo):
@@ -216,16 +220,22 @@ def comparar_con_original(wb_orig, salida, hojas_cambiadas):
 # --------------------------------------------------------------------------
 # Proceso principal
 # --------------------------------------------------------------------------
-def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
+def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH, hojas=()):
     archivo = Path(archivo)
     if not archivo.exists():
         raise tx.Abortar(f"no se encontró el archivo de trabajo en: {archivo}")
     valor = valor.strip()
     if not valor:
         raise tx.Abortar("--valor no puede estar vacío.")
-    filtros = [normalizar(f) for f in filtros if normalizar(f)]
-    if not filtros:
-        raise tx.Abortar("indicá al menos un --filtro no vacío.")
+    if hojas:
+        nombres = {normalizar(n) for n in openpyxl.load_workbook(archivo, read_only=True).sheetnames}
+        faltan = [h for h in hojas if normalizar(h) not in nombres]
+        if faltan:
+            raise tx.Abortar(f"no existe ninguna hoja llamada {faltan}.")
+    filtros = [normalizar(f) for f in (filtros or []) if normalizar(f)]
+    exactas = {normalizar(h) for h in (hojas or []) if normalizar(h)}
+    if not filtros and not exactas:
+        raise tx.Abortar("indicá al menos un --filtro o una --hoja.")
 
     sha_origen = tx.sha(archivo.read_bytes())
     wb_orig = openpyxl.load_workbook(archivo)  # referencia para comparar; nunca se guarda
@@ -235,7 +245,7 @@ def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
     # ---------------- Fase 1: inspección ----------------
     planes, sin_esquema = [], []
     for ws in wb.worksheets:
-        if ws.title in HOJAS_EXCLUIDAS or not hoja_coincide(ws.title, filtros):
+        if ws.title in HOJAS_EXCLUIDAS or not hoja_coincide(ws.title, filtros, exactas):
             continue
         enc = mapa_encabezados(ws)
         if not all(normalizar(e) in enc for e in ENCABEZADOS_DESTINO):
@@ -246,7 +256,8 @@ def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
     modo = "EJECUCIÓN" if execute else "DRY-RUN (no se modifica el archivo real)"
     print(f"\n=== Asignar Categoria | Modo: {modo} ===")
     print(f"Archivo: {archivo}")
-    print(f"Filtro de hojas: {', '.join(filtros)} | Valor: '{valor}'"
+    print(f"Hojas: {', '.join([f'contiene {f!r}' for f in filtros] + [f'= {h!r}' for h in sorted(exactas)])}"
+          f" | Valor: '{valor}'"
           f" | Sobrescribir otras categorías: {'sí' if sobrescribir else 'no'}\n")
 
     print("--- Fase 1: Inspección ---")
@@ -379,14 +390,14 @@ def procesar(filtros, valor, execute, sobrescribir, archivo=ARCHIVO_PATH):
     print(f"  {'OK' if ok2 else 'ERROR'} | {det2}")
 
     print("\n--- Verificación 3: Excel ---")
-    res = tx.abrir_en_excel(salida, carpeta)
-    ok3, lin = tx.evaluar_excel(res, planes_t, exigir_sin_filtros=False)
-    print("  Excel lo abrió sin pedido de reparación." if res.get("ok")
-          else "  Excel NO pudo abrirlo.")
     nombres = {t["tabla"] for t in planes_t} | {p["tabla"] for p in planes if p["tabla"]}
+    ok3, res, lin, intentos = tx.verificar_en_excel(salida, carpeta, planes_t,
+                                                    exigir_sin_filtros=False, requeridas=nombres)
+    print(("  Excel lo abrió sin pedido de reparación." if res.get("ok")
+           else "  Excel NO pudo abrirlo.") + (f" (intentos: {intentos})" if intentos > 1 else ""))
     mostrar_sig = False
     for linea in lin:
-        if linea.startswith("  ERROR"):
+        if linea.startswith("  ERROR") or linea.startswith("Excel:"):
             print(linea)
         elif "encabezados:" in linea:
             if mostrar_sig:
@@ -427,9 +438,12 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     p = argparse.ArgumentParser(
         description="Asigna un valor fijo en la columna Categoria de las hojas filtradas.")
-    p.add_argument("--filtro", action="append", required=True,
+    p.add_argument("--filtro", action="append",
                    help="Fragmento del nombre de hoja (se puede repetir). "
                         "Sin distinguir mayúsculas ni acentos.")
+    p.add_argument("--hoja", action="append",
+                   help="Nombre exacto de la hoja (se puede repetir). Sin distinguir "
+                        "mayúsculas ni acentos; no alcanza a otras hojas por coincidencia parcial.")
     p.add_argument("--valor", required=True, help="Texto de la categoría a escribir.")
     p.add_argument("--sobrescribir", action="store_true",
                    help="Reemplaza celdas que ya tienen otra categoría.")
@@ -438,7 +452,7 @@ def main():
                    help="Libro a procesar (por defecto, el archivo real).")
     args = p.parse_args()
     try:
-        procesar(args.filtro, args.valor, args.execute, args.sobrescribir, args.archivo)
+        procesar(args.filtro, args.valor, args.execute, args.sobrescribir, args.archivo, args.hoja)
     except (tx.Abortar, registro.RegistroError) as e:
         sys.exit(f"\nABORTADO: {e}")
 
