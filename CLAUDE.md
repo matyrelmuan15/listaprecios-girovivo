@@ -28,6 +28,7 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
    2. Dry-run / simulación con resumen (sin escribir nada).
    3. Ejecución real — solo tras aprobación explícita del usuario.
 10. **Toda columna que se agregue a una hoja de destino tiene que quedar dentro de la tabla de esa hoja** (ver "Columnas dentro de las tablas").
+11. **Nunca borrar archivos de `backup/` con comodines o patrones**; solo por nombre exacto y mostrando antes la lista de archivos a borrar.
 
 ## Columna ActualizadoSegun y hoja NoActualizados
 - `ActualizadoSegun` (última columna de cada hoja de destino, con lista desplegable) guarda la **última** forma en que se actualizó el precio: `Lista proveedor` (la escribe Tipo 1), `Dólar` (la escribe Tipo 4) o `Manual` (la carga el usuario a mano). Tipo 2 y Tipo 3 no la tocan. Se escribe y registra solo si el valor cambia.
@@ -97,7 +98,9 @@ ListaPreciosGiroVivo/
     ├── dolar.py                (regla única de validación del valor de dólar, compartido)
     ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro + control de capacidad de Marcas, solo lectura)
     ├── ampliar_marcas.py       (amplía las 6 fórmulas de Marcas editando solo su XML; requiere autorización expresa)
+    ├── normalizar_nombres.py   (normaliza NombreProducto de una hoja a "<PREFIJO> <MARCA> <MODELO>": --hoja y --prefijo; genera revision_nombres_<hoja>.xlsx para revisar y aplica solo Aplicar=SI, con MarcaPropuesta opcional; registra TipoOperacion "Nombre")
     ├── eliminar_filas_sin_fecha.py (elimina filas completas sin FechaActualizacion editando el XML; registra TipoOperacion "Eliminacion")
+    ├── mover_fila.py         (mueve una fila de producto de una hoja a otra por NombreProducto + CodigoDux, editando el XML: copia por encabezado, repone fórmulas, amplía/achica tablas; registra "Movimiento", "Estructura" y "Eliminacion"; dry-run por defecto, --execute para escribir)
     ├── migrar_registro.py      (migración de un solo uso de RegistroCambios)
     ├── ia_revision.py          (revisión automática de anomalías)
     ├── sincronizar_git.py      (sincronización con GitHub, usada por la interfaz)

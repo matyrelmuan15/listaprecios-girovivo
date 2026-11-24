@@ -80,6 +80,8 @@ TIPO_FORMULAS = "Formulas"
 TIPO_ESTRUCTURA = "Estructura"  # crear_columna_actualizado.py (encabezados nuevos)
 TIPO_ELIMINACION = "Eliminacion"  # eliminación de filas completas (Columna = "Fila completa")
 TIPO_CATEGORIA = "Categoria"  # asignar_categoria.py (valores de la columna Categoria)
+TIPO_NOMBRE = "Nombre"  # normalizar_nombres.py (valores de la columna NombreProducto)
+TIPO_MOVIMIENTO = "Movimiento"  # mover_fila.py (cada celda escrita en la hoja de destino)
 
 
 class RegistroError(Exception):
