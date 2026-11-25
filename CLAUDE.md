@@ -98,7 +98,7 @@ ListaPreciosGiroVivo/
     ├── dolar.py                (regla única de validación del valor de dólar, compartido)
     ├── verificar_formulas.py   (revisión y reparación de fórmulas en todo el libro + control de capacidad de Marcas, solo lectura)
     ├── ampliar_marcas.py       (amplía las 6 fórmulas de Marcas editando solo su XML; requiere autorización expresa)
-    ├── normalizar_nombres.py   (normaliza NombreProducto de una hoja a "<PREFIJO> <MARCA> <MODELO>": --hoja y --prefijo; genera revision_nombres_<hoja>.xlsx para revisar y aplica solo Aplicar=SI, con MarcaPropuesta opcional; registra TipoOperacion "Nombre")
+    ├── normalizar_nombres.py   (normaliza NombreProducto a "<PREFIJO> <MARCA> <MODELO>": pares --hoja/--prefijo repetibles (con varias hojas, --revision obligatorio); genera la planilla de revisión con una pestaña por hoja + SinCambios + Info y aplica solo Aplicar=SI, con MarcaPropuesta opcional, en una sola corrida con un backup; registra TipoOperacion "Nombre". Aplicado a MTB y, el 24/11/2026, a Ruta, Gravel y Paseo con revision_nombres_bicicletas.xlsx, y el 25/11/2026 a BMX-Infantiles con revision_nombres_bmx_infantiles.xlsx)
     ├── eliminar_filas_sin_fecha.py (elimina filas completas sin FechaActualizacion editando el XML; registra TipoOperacion "Eliminacion")
     ├── mover_fila.py         (mueve una fila de producto de una hoja a otra por NombreProducto + CodigoDux, editando el XML: copia por encabezado, repone fórmulas, amplía/achica tablas; registra "Movimiento", "Estructura" y "Eliminacion"; dry-run por defecto, --execute para escribir)
     ├── migrar_registro.py      (migración de un solo uso de RegistroCambios)
