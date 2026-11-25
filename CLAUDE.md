@@ -22,7 +22,8 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 7. Recorrer todas las hojas del libro **dinámicamente** en cada corrida — pueden agregarse categorías nuevas con el tiempo.
 8. Todo cambio se registra en `RegistroCambios`, con **una fila por cada celda modificada** (si se tocan 2 columnas en la misma fila, son 2 registros). El total de filas de `RegistroCambios` debe coincidir exactamente con la cantidad de celdas modificadas.
    - El formato es **único y compartido** por los tres scripts, y vive en `scripts/registro.py`: `Fecha | TipoOperacion | Hoja | Fila | NombreProducto | Marca | Columna | ValorAnterior | ValorNuevo | Detalle`. Ningún script define encabezados propios.
-   - Antes de escribir, cada script valida que los encabezados de la hoja coincidan con esos 10. Si no coinciden, aborta sin guardar en vez de apilar filas desalineadas.
+   - Antes de escribir, cada script valida que los encabezados de la hoja coincidan con esos 10. Si no coinciden, aborta sin guardar en vez de apilar filas desalineadas. Por eso no se escribe nada en la fila 1 de `RegistroCambios` a la derecha de la columna J.
+   - **Única excepción:** `scripts/archivar_registro.py` (archivo del historial) no registra celda por celda —sería registrar el borrado del propio registro—. Deja una sola fila `Estructura` con la cantidad de filas archivadas y el nombre del histórico.
 9. Flujo obligatorio en **3 fases**:
    1. Inspección (sin escribir nada).
    2. Dry-run / simulación con resumen (sin escribir nada).
@@ -102,6 +103,7 @@ ListaPreciosGiroVivo/
     ├── eliminar_filas_sin_fecha.py (elimina filas completas sin FechaActualizacion editando el XML; registra TipoOperacion "Eliminacion")
     ├── mover_fila.py         (mueve una fila de producto de una hoja a otra por NombreProducto + CodigoDux, editando el XML: copia por encabezado, repone fórmulas, amplía/achica tablas; registra "Movimiento", "Estructura" y "Eliminacion"; dry-run por defecto, --execute para escribir)
     ├── migrar_registro.py      (migración de un solo uso de RegistroCambios)
+    ├── archivar_registro.py    (archiva el historial de RegistroCambios en archivo/RegistroCambios_historico_<aaaammdd>_a_<aaaammdd>.xlsx y deja en el libro solo los encabezados + 1 fila "Estructura" — excepción a la regla 8; edita solo el XML de la hoja y quita calcChain.xml; las fórmulas vivas del registro pasan al histórico como texto; dry-run por defecto sobre copia temporal, --execute para escribir; nunca pisa un histórico existente. Primera corrida el 25/11/2026: 11.217 filas, 02/10/2026 a 25/11/2026)
     ├── ia_revision.py          (revisión automática de anomalías)
     ├── sincronizar_git.py      (sincronización con GitHub, usada por la interfaz)
     └── interfaz.py             (interfaz gráfica de escritorio)
