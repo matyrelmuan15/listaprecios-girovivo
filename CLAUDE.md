@@ -23,6 +23,7 @@ Este archivo aplica a **todos los proveedores** y a **ambos tipos de prompt** (a
 8. Todo cambio se registra en `RegistroCambios`, con **una fila por cada celda modificada** (si se tocan 2 columnas en la misma fila, son 2 registros). El total de filas de `RegistroCambios` debe coincidir exactamente con la cantidad de celdas modificadas.
    - El formato es **único y compartido** por los tres scripts, y vive en `scripts/registro.py`: `Fecha | TipoOperacion | Hoja | Fila | NombreProducto | Marca | Columna | ValorAnterior | ValorNuevo | Detalle`. Ningún script define encabezados propios.
    - Antes de escribir, cada script valida que los encabezados de la hoja coincidan con esos 10. Si no coinciden, aborta sin guardar en vez de apilar filas desalineadas. Por eso no se escribe nada en la fila 1 de `RegistroCambios` a la derecha de la columna J.
+   - Las fórmulas se registran como texto fijo (ValorAnterior/ValorNuevo nunca son fórmulas vivas); lo resuelve `registro.escribir_filas`.
    - **Única excepción:** `scripts/archivar_registro.py` (archivo del historial) no registra celda por celda —sería registrar el borrado del propio registro—. Deja una sola fila `Estructura` con la cantidad de filas archivadas y el nombre del histórico.
 9. Flujo obligatorio en **3 fases**:
    1. Inspección (sin escribir nada).

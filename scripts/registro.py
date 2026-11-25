@@ -226,11 +226,38 @@ def nueva_fila(fecha, tipo_operacion, hoja, fila, nombre_producto, marca,
     }
 
 
+def _es_texto_formula(valor):
+    """True si el valor es un texto que Excel/openpyxl tomarían como fórmula."""
+    return isinstance(valor, str) and valor.startswith("=")
+
+
+def _fijar_como_texto(celda):
+    """Deja la celda como texto fijo aunque su valor empiece con "=".
+
+    openpyxl marca como fórmula (data_type "f") todo texto que empieza con
+    "=", y Excel la recalcularía con el precio actual: el registro mostraría
+    un valor que no es el del momento del cambio. Con data_type "s" se guarda
+    como cadena (t="s" en el XML) y quotePrefix agrega el apóstrofo de Excel,
+    para que tampoco se convierta en fórmula si alguien edita la celda."""
+    celda.data_type = "s"
+    celda.quotePrefix = True
+
+
 def escribir_filas(ws_reg, filas):
     """Agrega las filas al final de la hoja, siempre en el orden de
-    REGISTRO_HEADERS."""
+    REGISTRO_HEADERS.
+
+    Todo valor que empiece con "=" (por ejemplo la fórmula anterior o nueva
+    de PrecioContado / PrecioSinIVA) se escribe como TEXTO fijo, nunca como
+    fórmula viva. Las hojas de destino no pasan por acá: ahí las fórmulas
+    siguen siendo fórmulas."""
     for fila in filas:
-        ws_reg.append([_valor_para_celda(fila[h]) for h in REGISTRO_HEADERS])
+        valores = [_valor_para_celda(fila[h]) for h in REGISTRO_HEADERS]
+        ws_reg.append(valores)
+        n = ws_reg._current_row  # fila que acaba de escribir append()
+        for j, valor in enumerate(valores, start=1):
+            if _es_texto_formula(valor):
+                _fijar_como_texto(ws_reg.cell(row=n, column=j))
 
 
 def verificar_conteo(filas, celdas_modificadas):
